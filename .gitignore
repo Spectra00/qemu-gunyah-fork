@@ -3,3 +3,5 @@ build/
 pyvenv/
 subprojects/dtc/
 subprojects/keycodemapdb/
+.github/
+HANDOFF_README.md
