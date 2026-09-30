@@ -303,3 +303,22 @@ Everything in this section comes from source reading plus a build that compiles 
 | 3 | `GUNYAH_MSI_SPI_BASE=16 GUNYAH_MSI_MAX_VECTORS=1` (one bell at 0x10, 5 doorbells total) | rejected → numbering, not count; accepted → a count limit exists after all |
 
 If run 1 is also rejected, the hypothesis is wrong. Capture `/sys/firmware/devicetree/base/hypervisor/` from the build-A guest (`diag/msi-a-no-msi-bells`, which boots to an initramfs shell) to see which guest vIRQs RM assigns to its own vdevices. A clash with SPIs 3+ would point to the next constraint.
+
+### 11.5 Run 1 confirmed on real hardware — the fix works
+
+Tested on-device (OnePlus 15, artifact from CI run `36785583988` @ `d693fab`, `virtio-keyboard-pci`, no env overrides — the fix's default layout):
+
+```
+ • MSI vector 0: bell-3 (SPI 3) gunyah.c:gunyah_arm_fdt_customize:150
+ • MSI vector 1: bell-4 (SPI 4) gunyah.c:gunyah_arm_fdt_customize:150
+ • msi_vectors=2 SPI range 3-4 (QEMU route lines 16-17) gunyah-vm-start.c:gunyah_start_vm:248
+ • VM_START OK gunyah-vm-start.c:gunyah_start_vm:262
+```
+
+with zero `rejected`/`gunyah:` lines anywhere in the parallel `dmesg` capture. The guest boots end to end: `GICv2m: DT overriding V2M MSI_TYPER (base:35, num:2)` (35 − 32 `GIC_INTERNAL` = SPI 3, matching the bell above), `pci 0000:00:01.0: [1af4:1052] type 00 class 0x090000`, `virtio-pci 0000:00:01.0: enabling device`, initrd unpacks (`Freeing initrd memory: 13600K`), `/init` runs, `systemd-udevd` starts — stopping only at the same benign point as every other no-disk run in this document (`Gave up waiting for root file system device`).
+
+**This confirms the fix works on the real vendor RM firmware, not just in CI.** The 11.2 hypothesis (doorbell label/SPI must stay in 0x0–0xf) is validated by this positive result; runs 2 and 3 (the control and the count-vs-numbering probe) would only add confirming/diagnostic detail, not change this conclusion.
+
+Runs 2/3 were attempted but did not complete: with `-nographic` and no disk attached, QEMU drops to the guest's initramfs emergency shell and ties it directly to the terminal. Any further commands pasted in the same terminal session before that shell is dealt with are consumed by the *guest* shell instead of the host, not run at all. Use `</dev/null` on the QEMU invocation (so the guest shell hits EOF and exits on its own) and run each test as its own separate paste/`su` session.
+
+**Caveat found during review, not yet exercised by any test here:** `create_uart()` for `VIRT_UART1` (guest SPI 8, inside the new 3–14 MSI window) is only gated on whether a second `-serial`/chardev is passed on the QEMU command line, not on `gunyah_enabled()` — unlike PCIe INTx, which is fully skipped under Gunyah. Every command line in this document uses exactly one `-serial`, so this hasn't triggered, but a future config with two serial chardevs would alias UART1's real interrupt with an MSI bell in this window. Worth gating `create_uart(VIRT_UART1, ...)` (or reserving SPI 8) if a second serial port is ever needed under Gunyah.
