@@ -127,7 +127,16 @@ void gunyah_arm_fdt_customize(void *fdt, uint64_t mem_base,
         }
     }
 
-    {
+    /*
+     * DIAGNOSTIC-ONLY build A -- not a fix. Keep the GICv2m frame's
+     * arm,msi-num-spis at the real vector count, but emit none of the
+     * per-MSI-vector bell-<label> doorbell vdevices, to isolate which of
+     * the two the Resource Manager rejects at VM_INIT (5600000b).
+     */
+    gh_report("DIAG-A: skipping %u per-vector MSI bell vdevices "
+              "(msi-num-spis left at %u)", state->msi_vectors,
+              state->msi_vectors);
+    if (0) {
         for (i = 0; i < state->msi_vectors; i++) {
             char *p;
             int label = GUNYAH_MSI_SPI_BASE + i;
