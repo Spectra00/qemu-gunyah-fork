@@ -19,7 +19,25 @@ void gunyah_set_swiotlb_size(uint64_t size);
 
 #define GUNYAH_V2M_BASE 0x08020000
 #define GUNYAH_V2M_SIZE 0x1000
-#define GUNYAH_MSI_SPI_BASE 16
+/*
+ * Guest-visible SPIs (and doorbell labels) used for MSI delivery. Each MSI
+ * vector becomes a /gunyah-vm-config/vdevices/bell-<label> doorbell with
+ * label == SPI. The Resource Manager on shipping Qualcomm firmware rejects
+ * VM_INIT (RM_ERROR_NORESOURCE) as soon as any such doorbell uses label/SPI
+ * 0x10 or above, while labels 0x0-0xf work (the same range crosvm uses:
+ * fixed SPIs 0-3 and 15, per-device SPIs from 4). So MSIs are packed into
+ * the free SPIs between the fixed bells (0x0, 0x1, 0x2) and bell-f.
+ * GUNYAH_MSI_SPI_BASE in the environment overrides the base (diagnostics).
+ */
+#define GUNYAH_MSI_SPI_BASE_DEFAULT 3
+#define GUNYAH_MSI_SPI_LIMIT 15
+/*
+ * QEMU-internal GIC input lines used to route guest MSI writes to the
+ * per-vector IRQFD eventfds. Kept separate from the guest-visible SPIs so
+ * that QEMU's own board IRQ lines (PCIe INTx on 3-6, UART1 on 8) never
+ * alias an MSI vector.
+ */
+#define GUNYAH_MSI_ROUTE_BASE 16
 #define GUNYAH_MSI_PHANDLE 4
 #define GUNYAH_VM_RESTART_STATUS 82
 

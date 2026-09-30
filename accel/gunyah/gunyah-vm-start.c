@@ -126,7 +126,7 @@ void gunyah_start_vm(void) {
       struct gh_fn_desc fdesc;
       struct gh_fn_irqfd_arg ghirqfd = {0};
       int efd;
-      int label = GUNYAH_MSI_SPI_BASE + i;
+      int label = s->msi_spi_base + i;
       efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
       if (efd < 0) {
         gh_report("eventfd failed for virtio bell-%x: %s", label,
@@ -152,7 +152,7 @@ void gunyah_start_vm(void) {
               s->msi_vectors);
     gunyah_gic_register_irq_notifiers(virtio_notifiers,
                                       s->msi_vectors,
-                                      GUNYAH_MSI_SPI_BASE);
+                                      GUNYAH_MSI_ROUTE_BASE);
     g_free(virtio_notifiers);
   }
   if (s->dtb_start) {
@@ -241,9 +241,11 @@ void gunyah_start_vm(void) {
     gh_report("active slots: %" PRIu32 " (nr_slots=%" PRIu32 ")", active,
               s->nr_slots);
     if (s->msi_vectors) {
-      gh_report("msi_vectors=%" PRIu32 " SPI range %u-%u", s->msi_vectors,
-                (unsigned)GUNYAH_MSI_SPI_BASE,
-                (unsigned)(GUNYAH_MSI_SPI_BASE + s->msi_vectors - 1));
+      gh_report("msi_vectors=%" PRIu32 " SPI range %" PRIu32 "-%" PRIu32
+                " (QEMU route lines %u-%u)", s->msi_vectors,
+                s->msi_spi_base, s->msi_spi_base + s->msi_vectors - 1,
+                (unsigned)GUNYAH_MSI_ROUTE_BASE,
+                (unsigned)(GUNYAH_MSI_ROUTE_BASE + s->msi_vectors - 1));
     } else {
       gh_report("msi_vectors=0 (no MSI SPIs)");
     }

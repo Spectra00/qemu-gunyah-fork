@@ -134,7 +134,7 @@ static const int a15irqmap[] = {
  [VIRT_UART1] = 8,
  [VIRT_MMIO] = 16,
  [VIRT_SMMU] = 74,
- [VIRT_GIC_V2M] = GUNYAH_MSI_SPI_BASE,
+ [VIRT_GIC_V2M] = GUNYAH_MSI_ROUTE_BASE,
 };
 
 static void create_randomness(MachineState *ms, const char *node)
@@ -598,8 +598,10 @@ typedef struct GunyahV2MState {
 static uint64_t gunyah_v2m_read(void *opaque, hwaddr offset, unsigned size)
 {
  if (offset == V2M_MSI_TYPER) {
- return ((GUNYAH_MSI_SPI_BASE + GIC_INTERNAL) << 16) |
- get_gunyah_state()->msi_vectors;
+ GUNYAHState *gs = get_gunyah_state();
+
+ return ((uint64_t)(gs->msi_spi_base + GIC_INTERNAL) << 16) |
+ gs->msi_vectors;
  }
  return 0;
 }
@@ -608,17 +610,23 @@ static void gunyah_v2m_write(void *opaque, hwaddr offset, uint64_t value,
  unsigned size)
 {
  GunyahV2MState *s = opaque;
+ GUNYAHState *gs = get_gunyah_state();
  int spi;
 
  if (offset != V2M_MSI_SETSPI_NS) {
  return;
  }
+ /*
+  * Guest writes the INTID of one of its MSI SPIs; route vector n to
+  * the QEMU-internal line whose notifier fires that vector's IRQFD.
+  */
  spi = (int)(value & 0x3ff) - GIC_INTERNAL;
- if (spi < GUNYAH_MSI_SPI_BASE ||
- spi >= GUNYAH_MSI_SPI_BASE + get_gunyah_state()->msi_vectors) {
+ if (spi < (int)gs->msi_spi_base ||
+ spi >= (int)(gs->msi_spi_base + gs->msi_vectors)) {
  return;
  }
- qemu_set_irq(qdev_get_gpio_in(s->gic, spi), 1);
+ qemu_set_irq(qdev_get_gpio_in(s->gic, GUNYAH_MSI_ROUTE_BASE +
+ (spi - (int)gs->msi_spi_base)), 1);
 }
 
 static const MemoryRegionOps gunyah_v2m_ops = {
@@ -1007,17 +1015,55 @@ static void gunyah_count_msi_vectors_bus(PCIBus *bus, void *opaque)
  pci_for_each_device_under_bus(bus, gunyah_count_msi_vectors_device, opaque);
 }
 
+static uint32_t gunyah_env_uint(const char *name, uint32_t def)
+{
+ const char *str = getenv(name);
+ unsigned int val;
+
+ if (!str) {
+ return def;
+ }
+ if (qemu_strtoui(str, NULL, 0, &val) < 0) {
+ error_report("Invalid %s=%s", name, str);
+ exit(1);
+ }
+ return val;
+}
+
 static void gunyah_set_msi_vectors(VirtMachineState *vms)
 {
  GUNYAHState *gs = get_gunyah_state();
- uint32_t vectors = 0;
+ uint32_t requested = 0;
+ uint32_t base, avail, vectors;
 
- pci_for_each_bus(vms->bus, gunyah_count_msi_vectors_bus, &vectors);
- if (vectors > NUM_IRQS - GUNYAH_MSI_SPI_BASE) {
- error_report("Gunyah requires %u MSI vectors, only %u are available",
- vectors, NUM_IRQS - GUNYAH_MSI_SPI_BASE);
+ pci_for_each_bus(vms->bus, gunyah_count_msi_vectors_bus, &requested);
+
+ base = gunyah_env_uint("GUNYAH_MSI_SPI_BASE", GUNYAH_MSI_SPI_BASE_DEFAULT);
+ if (base < GUNYAH_MSI_SPI_BASE_DEFAULT || base == GUNYAH_MSI_SPI_LIMIT ||
+ base >= NUM_IRQS) {
+ error_report("GUNYAH_MSI_SPI_BASE=%u overlaps a fixed Gunyah SPI "
+ "(0x0-0x2, 0xf) or is out of range", base);
  exit(1);
  }
+ /*
+  * Stay below bell-f when starting in the low window; a base above it
+  * (diagnostics only) keeps the old unbounded layout.
+  */
+ avail = base < GUNYAH_MSI_SPI_LIMIT ? GUNYAH_MSI_SPI_LIMIT - base
+ : NUM_IRQS - base;
+ avail = MIN(avail, (uint32_t)(NUM_IRQS - GUNYAH_MSI_ROUTE_BASE));
+ avail = MIN(avail, gunyah_env_uint("GUNYAH_MSI_MAX_VECTORS", avail));
+
+ vectors = MIN(requested, avail);
+ if (vectors < requested) {
+ warn_report("Gunyah: PCI devices request %u MSI vectors but only %u "
+ "guest SPIs (%u-%u) can carry MSIs; guest drivers will "
+ "fall back to fewer/shared vectors. Lower per-device "
+ "demand (e.g. virtio-*-pci,vectors=2 or num-queues=1) "
+ "so every device still gets at least 2.",
+ requested, vectors, base, base + vectors - 1);
+ }
+ gs->msi_spi_base = base;
  gs->msi_vectors = vectors;
 }
 

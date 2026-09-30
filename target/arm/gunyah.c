@@ -130,8 +130,8 @@ void gunyah_arm_fdt_customize(void *fdt, uint64_t mem_base,
     {
         for (i = 0; i < state->msi_vectors; i++) {
             char *p;
-            int label = GUNYAH_MSI_SPI_BASE + i;
-            int spi = GUNYAH_MSI_SPI_BASE + i;
+            int label = state->msi_spi_base + i;
+            int spi = state->msi_spi_base + i;
 
             nodename = g_strdup_printf(
                 "/gunyah-vm-config/vdevices/bell-%x", label);
@@ -147,6 +147,7 @@ void gunyah_arm_fdt_customize(void *fdt, uint64_t mem_base,
 
             qemu_fdt_setprop_cells(fdt, nodename, "interrupts",
                     GIC_FDT_IRQ_TYPE_SPI, spi, 0x01);
+            gh_report("MSI vector %d: bell-%x (SPI %d)", i, label, spi);
 
             g_free(nodename);
         }
@@ -275,7 +276,7 @@ void gunyah_arm_build_dtb(const struct arm_boot_info *binfo, void *fdt)
             fdt_setprop(fdt, v2m, "msi-controller", NULL, 0);
             fdt_setprop(fdt, v2m, "reg", v2m_reg, sizeof(v2m_reg));
             fdt_setprop_cell(fdt, v2m, "arm,msi-base-spi",
-                             GUNYAH_MSI_SPI_BASE + GIC_INTERNAL);
+                             gs->msi_spi_base + GIC_INTERNAL);
             fdt_setprop_cell(fdt, v2m, "arm,msi-num-spis",
                              gs->msi_vectors);
             fdt_setprop_cell(fdt, v2m, "phandle", GUNYAH_MSI_PHANDLE);

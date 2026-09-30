@@ -30,6 +30,7 @@ struct GUNYAHState {
     uint64_t dtb_size;
     uint64_t kernel_entry;
     uint32_t msi_vectors;
+    uint32_t msi_spi_base;
 };
 struct AccelCPUState {
     int fd;
