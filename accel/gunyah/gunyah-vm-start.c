@@ -225,6 +225,33 @@ void gunyah_start_vm(void) {
       }
     }
   }
+  {
+    uint32_t active = 0;
+    gh_report("=== Gunyah VM topology before GH_VM_START ===");
+    for (i = 0; i < s->nr_slots; ++i) {
+      if (s->slots[i].size == 0) {
+        continue;
+      }
+      gh_report("slot[%d]: id=%" PRIu32 " start=0x%" PRIx64
+                " size=0x%" PRIx64 " lend=%d flags=0x%" PRIx32,
+                i, s->slots[i].id, s->slots[i].start, s->slots[i].size,
+                s->slots[i].lend, s->slots[i].flags);
+      active++;
+    }
+    gh_report("active slots: %" PRIu32 " (nr_slots=%" PRIu32 ")", active,
+              s->nr_slots);
+    if (s->msi_vectors) {
+      gh_report("msi_vectors=%" PRIu32 " SPI range %u-%u", s->msi_vectors,
+                (unsigned)GUNYAH_MSI_SPI_BASE,
+                (unsigned)(GUNYAH_MSI_SPI_BASE + s->msi_vectors - 1));
+    } else {
+      gh_report("msi_vectors=0 (no MSI SPIs)");
+    }
+    gh_report("dtb_start=0x%" PRIx64 " dtb_size=0x%" PRIx64, s->dtb_start,
+              s->dtb_size);
+    gh_report("swiotlb_size=0x%" PRIx64, s->swiotlb_size);
+    gh_report("=== end topology dump ===");
+  }
   ret = gunyah_vm_ioctl(GH_VM_START);
   if (ret != 0) {
     gh_report("Failed to start VM: %s (errno=%d)", strerror(errno), errno);

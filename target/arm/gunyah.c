@@ -74,6 +74,10 @@ void gunyah_arm_fdt_customize(void *fdt, uint64_t mem_base,
                 state->slots[i].start < (1ULL << 30)) {
             continue;
         }
+        gh_report("shm-%x vdevice: slot[%d] start=0x%" PRIx64
+                  " size=0x%" PRIx64 " lend=%d flags=0x%" PRIx32,
+                  i, i, state->slots[i].start, state->slots[i].size,
+                  state->slots[i].lend, state->slots[i].flags);
 
         nodename = g_strdup_printf("/gunyah-vm-config/vdevices/shm-%x", i);
         qemu_fdt_add_subnode(fdt, nodename);
