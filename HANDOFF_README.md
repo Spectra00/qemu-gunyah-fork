@@ -266,3 +266,40 @@ No `rejected`/`gunyah:` error lines appear anywhere in the parallel `dmesg` capt
 - Consider whether the per-vector bells need a different vdevice type/config (e.g. reusing/aliasing IRQFD-based delivery already wired up in `gunyah_start_vm()`, rather than a doorbell object per vector) instead of one new doorbell vdevice per MSI vector.
 
 Diagnostic branches (not merged to `main`, kept for reference): `diag/msi-a-no-msi-bells` (`7e203c8`), `diag/msi-b-numspis-zero` (`bee012f`).
+
+## 11. UPDATE — why RM rejects the per-vector bells (analysis) and candidate fix `fix/msi-low-spi-window` (NOT yet tested on hardware)
+
+Everything in this section comes from source reading plus a build that compiles in CI. **None of it has been run on the device yet.** 11.4 lists the on-device runs that will confirm or refute it.
+
+### 11.1 What the public Resource Manager source says (`quic/gunyah-resource-manager`, 2026-03 drop)
+
+- `0x5600000b` is `VM_INIT` (`include/vm_creation_message.h`). `Error: 2` is `RM_ERROR_NORESOURCE` (`include/rm_types.h`), and the Linux driver turns it into `-ENODEV` / errno 19. RM ran out of, or could not allocate, something. A malformed property would be `RM_ERROR_ARGUMENT_INVALID` or `RM_ERROR_MSG_INVALID`.
+- RM never reads `arm,msi-num-spis`, `arm,msi-base-spi` or any GICv2m node. `platform_parse_gic()` only checks the GIC node's compatible string, `interrupt-controller`, `#interrupt-cells`, `reg` and redistributor stride. That agrees with section 10: the v2m property is inert.
+- A doorbell vdevice (`parse_doorbell()` → `handle_doorbell()` → `configure_doorbell_with_peer()`) creates a hypervisor doorbell object, copies capabilities into the guest's and HLOS's cspaces, maps the fixed guest vIRQ from `interrupts` (`map_virq()` → `irq_manager_vm_virq_map()`), and binds it with `doorbell_bind_virq`. With `peer-default` the peer (HLOS) is the source and gets no vIRQ.
+- **No path in the public source returns `NORESOURCE` for our bells.** A duplicate vIRQ gives `DENIED` (`dict_add`), an out-of-range one gives `ARGUMENT_INVALID`, and a DTB overlay that doesn't fit gives `ARGUMENT_INVALID`. The only "pool exhausted" `NORESOURCES` is dynamic vIRQ allocation (`irq_manager_vm_alloc_global`), which a doorbell with a fixed `interrupts` property never uses. The guest VIC is configured with `max_virqs = GIC_SPI_NUM` (988). **So the device's vendor RM differs from the public drop, and the exact rule can't be read from source.**
+
+### 11.2 The working hypothesis: doorbell label/SPI must stay in 0x0–0xf
+
+- The four fixed bells that always work use label = SPI ∈ {0x0, 0x1, 0x2, 0xf}. Every per-vector bell used label = SPI = 16 + n (0x10 and up). Label/SPI numbering is the only property that differs between them (section 10's property diff).
+- This fork's bell format is copied from crosvm (`hypervisor/src/gunyah/aarch64.rs`: same `generate`, `label`, `peer-default`, `source-can-clear` and `interrupts`). crosvm is the VMM Android ships on Gunyah. Its aarch64 layout (`aarch64/src/lib.rs`) uses fixed SPIs 0 and 2 (serial), 1 (RTC), 3 (battery), 15 (VM watchdog) and per-device INTx SPIs from 4 upward, **with no MSI**. So in practice every doorbell a shipping RM is known to accept sits at 0x0–0xf. Our MSI bells were the first ones at 0x10 or above.
+- **A per-VM doorbell count limit is unlikely.** A limit at or below 5 (4 fixed + 2 MSI = 6 already fails) would break crosvm protected VMs, which run with more doorbells than that. The `msi_vectors=1` run in 11.4 (5 doorbells) tests it directly.
+
+### 11.3 Candidate fix — branch `fix/msi-low-spi-window` @ `d693fab`
+
+- **Guest-visible MSI SPIs moved from 16+ to 3–14:** the free SPIs between the fixed bells 0x0–0x2 and bell-f. The base is runtime state, `GUNYAHState.msi_spi_base` (default `GUNYAH_MSI_SPI_BASE_DEFAULT = 3`). It drives the bell labels and SPIs, the IRQFD labels in `gunyah_start_vm()`, GICv2m `arm,msi-base-spi` and the emulated `V2M_MSI_TYPER`.
+- **QEMU-internal routing kept separate:** a guest MSI write to `V2M_MSI_SETSPI_NS` for guest SPI `base + n` now raises QEMU GIC line `GUNYAH_MSI_ROUTE_BASE (16) + n`, where that vector's IRQFD notifier is registered. QEMU's own board lines 3–6 (PCIe INTx) and 8 (UART1) therefore never fire an MSI eventfd.
+- **Capacity is 12 vectors.** If PCI devices request more, `msi_vectors` is clamped with a `warn_report` instead of producing a VM that RM rejects. Linux virtio-pci then falls back to 2 shared vectors per device, and devices that get fewer than 2 fall back to INTx, which is not wired under Gunyah. Keep total demand at or under 12 with `vectors=2` / `num-queues=1` on virtio-*-pci. For example, 6-vCPU virtio-blk-pci asks for 7 by default.
+- **Environment overrides for on-device confirmation:**
+  - `GUNYAH_MSI_SPI_BASE=<n>` sets the guest MSI SPI base. It must be ≥ 3 and ≠ 15. A base above 15 keeps the old unbounded layout, so `GUNYAH_MSI_SPI_BASE=16` reproduces the pre-fix layout as a control.
+  - `GUNYAH_MSI_MAX_VECTORS=<n>` caps the vector count.
+- New log line per bell: `MSI vector N: bell-<label> (SPI S)`. The topology dump now prints `SPI range a-b (QEMU route lines c-d)`.
+
+### 11.4 On-device runs needed (same harness as section 9, `virtio-keyboard-pci`, 2 vectors)
+
+| Run | Environment | Expected if the 11.2 hypothesis is right |
+|---|---|---|
+| 1 | *(none)*: bells at 0x3, 0x4 | `VM_START OK`, keyboard gets MSIs (`GICv2m: ... (base:35, num:2)`, virtio-input probes) |
+| 2 | `GUNYAH_MSI_SPI_BASE=16` (control, old layout) | RM rejects `5600000b` again |
+| 3 | `GUNYAH_MSI_SPI_BASE=16 GUNYAH_MSI_MAX_VECTORS=1` (one bell at 0x10, 5 doorbells total) | rejected → numbering, not count; accepted → a count limit exists after all |
+
+If run 1 is also rejected, the hypothesis is wrong. Capture `/sys/firmware/devicetree/base/hypervisor/` from the build-A guest (`diag/msi-a-no-msi-bells`, which boots to an initramfs shell) to see which guest vIRQs RM assigns to its own vdevices. A clash with SPIs 3+ would point to the next constraint.
