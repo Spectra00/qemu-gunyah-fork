@@ -276,8 +276,16 @@ void gunyah_arm_build_dtb(const struct arm_boot_info *binfo, void *fdt)
             fdt_setprop(fdt, v2m, "reg", v2m_reg, sizeof(v2m_reg));
             fdt_setprop_cell(fdt, v2m, "arm,msi-base-spi",
                              GUNYAH_MSI_SPI_BASE + GIC_INTERNAL);
-            fdt_setprop_cell(fdt, v2m, "arm,msi-num-spis",
-                             gs->msi_vectors);
+            /*
+             * DIAGNOSTIC-ONLY build B -- not a fix. Force msi-num-spis
+             * to 0 while still emitting every per-vector bell-<label>
+             * doorbell vdevice, to isolate which of the two the Resource
+             * Manager rejects at VM_INIT (5600000b).
+             */
+            gh_report("DIAG-B: forcing arm,msi-num-spis=0 "
+                      "(real msi_vectors=%u, bells still emitted)",
+                      gs->msi_vectors);
+            fdt_setprop_cell(fdt, v2m, "arm,msi-num-spis", 0);
             fdt_setprop_cell(fdt, v2m, "phandle", GUNYAH_MSI_PHANDLE);
         }
     }
