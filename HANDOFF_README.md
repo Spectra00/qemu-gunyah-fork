@@ -176,3 +176,68 @@ dtc -I dtb -O dts /sdcard/dtb.bin | grep -A5 chosen
 ## 8. Reference: the "before" state
 
 The original upstream issue this fork addresses is filed as: *"Gunyah-accelerated boot never populates /chosen/linux,initrd-start|end — kernel has no way to find the initrd"* — see the linked issue on `Droid-VM/DroidVM` for the full original bug report, including the RM-rejection and virtio-blk-hang findings in complete detail.
+
+---
+
+## 9. UPDATE — initrd fix confirmed on real hardware; new MSI/GH_VM_START bug found and precisely scoped
+
+Everything below is from an actual on-device test session (OnePlus 15, same environment as section 2), run against a **fresh cross-compile of this fork** (commit `80b82bf`, built via `.github/workflows/build.yml`, downloaded as the `qemu-gunyah-arm64` Actions artifact and run manually in Termux via `su`), not the DroidVM app-bundled binary. Diagnostic logging added in `80b82bf` (a topology dump in `gunyah_start_vm()` right before `GH_VM_START`, plus per-`shm-<id>` vdevice logging in `gunyah_arm_fdt_customize()`) is what made this possible.
+
+### 9.1 The initrd fix (commit `21fdc26`) is confirmed working end-to-end
+
+Protected mode, direct kernel+initrd boot, **no block device attached** (to isolate the fix from the separate bug below):
+
+```
+[    0.176502] Trying to unpack rootfs image as initramfs...
+[    0.291920] Freeing initrd memory: 13600K
+...
+[    0.473099] Run /init as init process
+Loading, please wait...
+Starting systemd-udevd version 252.39-1~deb12u2
+...
+Gave up waiting for root file system device.  Common problems: ...
+ALERT!  PARTUUID=dcfd78c7-076c-48a6-905b-1485e18f1d16 does not exist.  Dropping to a shell!
+```
+
+The initrd unpacks and `/init` runs — the fix works. The only failure here is the *expected* one (no disk was attached in this run). `gh_report` also confirmed `VM_START OK` for this exact run. **Section 1's "kernel panics because initrd never unpacked" description is now stale/historical — that specific failure is fixed.**
+
+### 9.2 New bug found: `GH_VM_START` is rejected by the Resource Manager whenever *any* PCI device requests MSI vectors — unrelated to block devices, iothreads, or the initrd fix
+
+This is a **different bug from Issue 1** in section 2/the original report. Issue 1 was RM refusing to authorize an *unprotected* VM (`RM rejected message 56000004`). This is a **protected**-mode VM (`confidential-guest-support=prot0`, `-accel gunyah`) being rejected by a **different** RM message once a device topology requiring MSI is presented to it:
+
+```
+gunyah: RM rejected message 5600000b. Error: 2
+misc gunyah: Failed to initialize VM: -19
+```
+which QEMU surfaces as:
+```
+Failed to start VM: No such device (errno=19)
+```
+
+Four on-device runs isolated the exact trigger, each changing exactly one variable from the last:
+
+| Run | Devices attached | `msi_vectors` (from the topology dump) | Result |
+|---|---|---|---|
+| 1 | none (kernel+initrd only) | 0 | `VM_START OK` — boots as in 9.1 |
+| 2 | `virtio-blk-pci` + iothread (matches original DroidVM config) | 7 | RM rejects `5600000b` |
+| 3 | `virtio-blk-pci`, **no** iothread (sync I/O) | 7 | RM rejects `5600000b` — rules out iothread/ioeventfd |
+| 4 | `virtio-keyboard-pci` only — no disk, no net, no iothread | 2 | RM rejects `5600000b` — rules out block devices specifically |
+
+Every individual setup ioctl before `GH_VM_START` succeeds without error in all failing runs — all memory-slot lends (`GH_VM_ANDROID_LEND_USER_MEM`), all IRQFD registrations including the per-MSI-vector ones (`"N/N virtio IRQFDs created OK"`), `GH_VM_SET_DTB_CONFIG`, and `GH_VM_SET_BOOT_CONTEXT` all return success. **Only the final, holistic `GH_VM_START` call is rejected, and only when `msi_vectors > 0`.**
+
+**Likely area:** when `msi_vectors > 0`, `gunyah_arm_build_dtb()` / `gunyah_arm_fdt_customize()` (`target/arm/gunyah.c`) additionally emit, versus the `msi_vectors == 0` case:
+- the GICv2m frame's `arm,msi-num-spis` property (set to `gs->msi_vectors`), and
+- one `/gunyah-vm-config/vdevices/bell-<label>` doorbell vdevice per MSI vector (labels `GUNYAH_MSI_SPI_BASE..GUNYAH_MSI_SPI_BASE+msi_vectors-1`), generated in the loop right after the 4 fixed bells in `gunyah_arm_fdt_customize()`.
+
+Both look structurally sound by source inspection (matches the style of the always-present fixed-bell vdevices), so this reads as an RM-side rejection of that specific vdevice/GICv2m-MSI configuration — not an obviously malformed QEMU-side DTB. Confirming the exact mechanism will need either a firmware-level trace of RM's own decision (not available — Qualcomm's Resource Manager is closed-source) or bisecting the vdevice properties one at a time (e.g. try emitting the GICv2m `msi-num-spis` property without the per-vector `bell-*` vdevices, or vice versa, and see which one alone triggers the rejection).
+
+**Attempted workaround, inconclusive:** tried forcing `virtio-blk-pci` into legacy INTx mode (`disable-legacy=off,disable-modern=on`) to avoid MSI entirely. This build's virtio-blk-pci model rejects that property combination outright (`Device doesn't support modern mode, and legacy mode is disabled` — a QEMU realize()-time error, unrelated to Gunyah) before ever reaching gunyah code. Not investigated further; a legacy-mode workaround remains untested.
+
+**Practical implication:** in this build, any real disk or network device (all realistic use cases need MSI, not legacy INTx, for performance) currently cannot boot in protected mode on this device+RM-firmware combination. This is very likely why the original bug report's fuller DroidVM config (two `virtio-blk-pci` + net + audio + USB + VNC, all presumably requesting MSI) is described as reaching kernel boot successfully — that claim was never independently reproduced against *this exact rebuilt binary*; it may reflect a difference between DroidVM's actual shipped binary and this fork's current build, or a difference in RM firmware state on the device between then and now. Worth re-verifying against DroidVM's own binary specifically before assuming this is a regression in this fork.
+
+### 9.3 Diagnostic instrumentation now in this fork (commit `80b82bf`)
+
+- `accel/gunyah/gunyah-vm-start.c`: topology dump (`gh_report`) of every active memory slot, active slot count, `msi_vectors` + SPI range, `dtb_start`/`dtb_size`, `swiotlb_size` — printed immediately before `GH_VM_START`.
+- `target/arm/gunyah.c`: logs each `shm-<id>` vdevice as `gunyah_arm_fdt_customize()` generates it.
+
+Use these (`grep` for `"=== Gunyah VM topology"` / `"vdevice: slot"` in stderr) on any future repro instead of re-adding logging from scratch.
