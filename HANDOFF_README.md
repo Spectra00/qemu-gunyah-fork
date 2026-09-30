@@ -241,3 +241,28 @@ Both look structurally sound by source inspection (matches the style of the alwa
 - `target/arm/gunyah.c`: logs each `shm-<id>` vdevice as `gunyah_arm_fdt_customize()` generates it.
 
 Use these (`grep` for `"=== Gunyah VM topology"` / `"vdevice: slot"` in stderr) on any future repro instead of re-adding logging from scratch.
+
+## 10. UPDATE — root cause of the `GH_VM_START` MSI rejection narrowed to the per-vector `bell-<label>` doorbell vdevices, confirmed on real hardware
+
+Section 9.2 left two candidate causes for the `RM rejected message 5600000b` / `RM_ERROR_NORESOURCE` failure: the GICv2m `arm,msi-num-spis` property, or the per-MSI-vector `bell-<label>` doorbell vdevices. A single-variable bisection was run to distinguish them, using two throwaway diagnostic branches built off `10050e1`:
+
+- **`diag/msi-a-no-msi-bells` @ `7e203c8`** — keeps the real `arm,msi-num-spis` value, but skips generating the per-vector `bell-<label>` vdevices entirely (wraps that loop in `if (0)` in `gunyah_arm_fdt_customize()`).
+- **`diag/msi-b-numspis-zero` @ `bee012f`** — keeps the per-vector bell vdevices, but forces `arm,msi-num-spis` to `0` instead of the real vector count.
+
+**Build A result (tested on-device, OnePlus 15, `virtio-keyboard-pci`, `msi_vectors=2`):**
+
+```
+DIAG-A: skipping 2 per-vector MSI bell vdevices (msi-num-spis left at 2) gunyah.c:gunyah_arm_fdt_customize:138
+VM_START OK gunyah-vm-start.c:gunyah_start_vm:260
+```
+
+No `rejected`/`gunyah:` error lines appear anywhere in the parallel `dmesg` capture — a clean pass. The guest correctly enumerates the device (`pci 0000:00:01.0: [1af4:1052] type 00 class 0x090000`, `GICv2m: DT overriding V2M MSI_TYPER (base:48, num:2)`, `virtio-pci 0000:00:01.0: enabling device`), the initrd unpacks (`Freeing initrd memory: 13600K`), and boot proceeds to `/init`/`systemd-udevd`, stopping only for the expected reason (no root disk attached in this test) — identical to the known-good no-device baseline in section 9.2's Run 1.
+
+**Conclusion: the per-vector `bell-<label>` doorbell vdevices are the cause of the RM rejection, not the `arm,msi-num-spis` GICv2m property.** RM accepts an MSI-capable GICv2m frame (real `msi-num-spis`) without complaint; it only rejects once the matching per-vector doorbell vdevices are also present. Build B (bells present, `msi-num-spis` forced to 0) was not run — it would only be confirmatory at this point, not decisive, since build A alone already isolates the variable.
+
+**Next step:** investigate why RM's doorbell-object creation (`RM_ERROR_NORESOURCE`, i.e. RM believes some resource/handle/capability needed to create the doorbell is unavailable) fails specifically for these per-vector bells but not for the four always-present fixed-label bells emitted earlier in the same function. Likely angles:
+- Diff the property set of a per-vector `bell-<label>` vdevice against a fixed bell vdevice (label/id numbering scheme, `gunyah-label`, IRQ/SPI number encoding, any capability/resource count field) for a structural difference RM's per-vdevice or per-VM resource accounting would reject.
+- Check whether RM enforces a fixed maximum number of doorbell/bell vdevices per VM (the four fixed bells plus N per-vector bells may exceed some allowed doorbell count, if `RM_ERROR_NORESOURCE` reflects a capability-table/slot exhaustion) — public reference source: `quic/gunyah-resource-manager`.
+- Consider whether the per-vector bells need a different vdevice type/config (e.g. reusing/aliasing IRQFD-based delivery already wired up in `gunyah_start_vm()`, rather than a doorbell object per vector) instead of one new doorbell vdevice per MSI vector.
+
+Diagnostic branches (not merged to `main`, kept for reference): `diag/msi-a-no-msi-bells` (`7e203c8`), `diag/msi-b-numspis-zero` (`bee012f`).
