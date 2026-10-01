@@ -358,3 +358,75 @@ msi_vectors=2 SPI range 16-17 gunyah-vm-start.c:gunyah_start_vm:246
 **Conclusion:** repetition/accumulation alone, without a reboot, does not bring the rejection back — at least not within 5 repeated lifecycles of the exact originally-failing config. This weighs against a simple "N failed attempts exhaust a resource" leak model (if that were the mechanism, repeating the exact failing config 5 times with no intervening reboot should have reproduced it at least once, and instead every single repetition succeeded). It's more consistent with: the reboot itself cleared whatever state the original section 9.2–10 failing runs had left behind, and that state does not reliably reaccumulate from pass-only runs — i.e. the leak (if it is a leak) is likely tied to the *abrupt/improper teardown* of a *rejected* `VM_INIT`, not to successful VM lifecycles. Since none of these 9 runs failed, none of them could test reaccumulation from repeated failures — that would require deliberately forcing `GH_VM_START` to fail again, which is no longer possible on demand now that the original failure doesn't reproduce.
 
 **Standing guidance unchanged:** `fix/msi-low-spi-window` remains unconfirmed as a fix for the real bug and should not be merged to `main` as "the fix." The practical state of this investigation is that the original rejection is not currently reproducible by any means tried so far (different SPI layouts, different vector counts, repeated back-to-back lifecycles), which blocks further confirmation of any fix until a reliable repro is found again — most likely by deliberately forcing failed `VM_INIT` attempts (if a way to do that is found) and testing whether failures specifically, not successes, are what cause the state to reaccumulate.
+
+## 14. ANALYSIS — forcing a `VM_INIT` rejection on demand, and what "unclean teardown" actually means at the kernel level (source-only, nothing run on hardware)
+
+### 14.1 Correction to 11.1: `Error: 2` does **not** mean a resource ran out
+
+In the public RM, `svm_init()` (`src/vm_creation/second_vm.c`) reports **every** failure from `vm_config_create_vdevices()` to HLOS as `RM_ERROR_NORESOURCE`, whatever the real cause:
+
+```c
+error_t create_ret = vm_config_create_vdevices(vm->vm_config, parser_data);
+if (create_ret != OK) { ...; err = RM_ERROR_NORESOURCE; goto out; }
+```
+
+So a duplicate vIRQ (`ERROR_DENIED`), a bad argument, a failed cap copy, too many vCPUs and so on all reach the kernel as `RM rejected message 5600000b. Error: 2`, which the kernel maps to `-ENODEV` (`rsc_mgr.c`). The original rejection therefore only tells us *some vdevice handler failed during VM_INIT*, not that anything was exhausted. Section 11.1's "RM ran out of something" reading was wrong. It also means **any deliberately invalid vdevice config produces exactly the same externally visible failure as the original bug.**
+
+`vm_config_create_vdevices()` runs its handlers in a fixed order and stops at the first error, with no rollback of its own: interrupt controller → irqs → iomems → watchdog → vRTC → **vcpu** → rm-rpc → **doorbell** → msgqueue → msgqueue-pair → shm → virtio → pci → vGIC → platform → … → demand paging. Objects created before the failing handler, such as the doorbells and their capabilities copied into HLOS's cspace, are not destroyed then. The VM just goes to `VM_STATE_INIT_FAILED`.
+
+### 14.2 What teardown after a rejection looks like (Android `drivers/virt/gunyah`, `android16-6.12`)
+
+- `gunyah_vm_start()` (`vm_mgr.c`): on a `gunyah_rm_vm_init()` failure it sets `INIT_FAILED`, prints `Failed to initialize VM: -19` and returns. QEMU then prints `Failed to start VM` and `exit(1)`s.
+- All cleanup happens in `_gunyah_vm_put()`, which runs when the last reference to the VM file descriptor is dropped. **A normal exit, `exit(1)` after the rejection, and SIGKILL all reach this same path**, because the kernel closes the process's fds either way. A separate "QEMU exited uncleanly" condition doesn't exist at the kernel level. What differs is **the VM state at release**:
+  - From `RUNNING`: `gunyah_vm_stop()`, then reset, then dealloc.
+  - From `INIT_FAILED`: `gunyah_rm_vm_reset()`, then `wait_event()` **with no timeout** for RM's `RESET`/`RESET_FAILED` notification, then `gunyah_rm_dealloc_vmid()`. RM destroys the partially created vdevices (doorbells included) only on that `VM_RESET`.
+- So "a rejection leaks something" would show up as one of these, each observable from the host:
+  - (a) `Failed to reset the vm` / `Failed post reset the vm` / `Failed to deallocate vmid` in dmesg;
+  - (b) `WARNING:` splats from the `WARN_ON(gunyah_vm_reclaim_range…)` / `WARN_ON(gunyah_reclaim_parcels…)` memory-reclaim checks;
+  - (c) the exiting `qemu-system-aarch64` stuck in uninterruptible `D` state, if RM never sends the reset notification;
+  - (d) RM-side state the kernel can't see, which would only show as a later, otherwise valid `VM_INIT` failing.
+  Sections 9–10 captured only the `rejected` lines, so (a)–(c) were never checked for the original failures.
+- **Direct inspection:** the driver has no debugfs and no sysfs attributes. Its only `trace_*` calls are Android vendor hooks (`android_rvh_gh_*`), which tracefs can't see. RM's own log (`GET_LOG` message, `log.c`) isn't exposed by this driver. The driver does emit kobject uevents `EVENT=create` / `EVENT=destroy` with `vm_id`, and `destroy` fires only at the very end of `_gunyah_vm_put()`, so seeing it means teardown completed. **So RM's capability/doorbell accounting can't be read directly from the host**; it can only be inferred from (a)–(d).
+
+### 14.3 A deterministic rejection that needs no code change: `-smp 16`
+
+`handle_vcpu()` rejects `vcpu_count > rm_get_platform_max_cores()` with `ERROR_DENIED` (`"Error: invalid vcpu count(%u) vs max cores(%u)"`). That reaches the kernel as `5600000b` / `Error: 2` (14.1). The Snapdragon 8 Elite has 8 cores. QEMU accepts `-smp 16`, this fork's DTB builder emits 16 `/cpus` nodes, and the kernel's vCPU function bind only records the ID as a ticket label with no limit, so the run should get all the way to RM's `VM_INIT`.
+
+Limitation: this failure happens in `handle_vcpu()`, **before** `handle_doorbell()`, so no doorbells or their HLOS caps exist when it aborts. It tests "does *any* rejected `VM_INIT` leave reboot-clearable state", not specifically "does a rejection *after doorbells were created* leak them". The latter needs a code change (14.5).
+
+### 14.4 Proposed on-device test (copy-paste; uses the `control-stock` binary, commit `74874e2`)
+
+Use your existing control-stock `virtio-keyboard-pci` command (the one from section 13 that printed `msi_vectors=2 SPI range 16-17` and `VM_START OK`) and change **only** the `-smp` argument. Call the two variants `GOOD` (your current `-smp`) and `BAD` (`-smp 16,sockets=1,cores=16,threads=1`).
+
+**⚠ Warning before running:** if the leak theory is right, this is meant to recreate the bad state. Afterwards VMs, including the DroidVM app's, may fail to start until the phone is rebooted. If teardown hangs (14.2 (c)), the QEMU process may be unkillable until reboot.
+
+```sh
+# as root (su), once per iteration
+dmesg -c > /dev/null                         # clear kernel log
+<BAD command> 2> bad_N.log                   # expect exit with "Failed to start VM ... (errno=19)"
+sleep 2
+ps -A -o PID,STAT,NAME | grep qemu           # expect nothing; a 'D' entry means teardown hung
+dmesg > bad_N.dmesg
+grep -nE "rejected|Failed to (initialize|reset|deallocate)|post reset|WARNING|gunyah" bad_N.dmesg
+grep -n "=== Gunyah VM topology" -A12 bad_N.log   # confirms 16 vCPUs + msi_vectors=2 reached GH_VM_START
+```
+
+1. **Calibrate (1×BAD):** expect `RM rejected message 5600000b. Error: 2` + `Failed to initialize VM: -19` in dmesg, `Failed to start VM: No such device (errno=19)` from QEMU, no `Failed to reset/deallocate`, no `WARNING`, no leftover `qemu` process.
+   - If QEMU fails **before** the topology dump (a different error), `-smp 16` doesn't reach `VM_INIT` on this firmware; stop and report.
+   - If RM *accepts* 16 vCPUs, try `-smp 32,sockets=1,cores=32,threads=1`.
+2. **Accumulate:** alternate `BAD`, `GOOD`, `BAD`, `GOOD`, … for up to 10 pairs, capturing dmesg each time.
+   - The leak theory predicts that some `GOOD` run eventually fails with `5600000b` even though its config is valid. That would give an on-demand repro, and the pair count says how many rejections it takes.
+   - Any `Failed to reset/deallocate`, `WARNING` or stuck `D`-state process after a `BAD` run is direct evidence of a teardown leak, even if `GOOD` keeps passing.
+3. **Optional control (accepted, then SIGKILL):** run `GOOD`, and as soon as `VM_START OK` appears, run `kill -9 $(pidof qemu-system-aarch64)`. Repeat 5×, then one plain `GOOD`. This exercises release from `RUNNING` with the guest barely started. 14.2 predicts it is no different from a normal exit, so it is low priority.
+
+How to read it:
+- `GOOD` starts failing after N `BAD`s → rejected `VM_INIT`s accumulate reboot-clearable state, and we have a repro to test `fix/msi-low-spi-window` (or any fix) against.
+- 10 pairs with no `GOOD` failure and clean teardown logs → a rejection *before* doorbells doesn't leak. 14.5 is then the remaining way to test the doorbell-specific version of the theory.
+
+### 14.5 Proposed (NOT implemented) diagnostic knob for a rejection *after* doorbells exist — needs a `.c` change, flagged for approval
+
+To reproduce the original failure's shape more closely (RM aborting inside `handle_doorbell` after some doorbells and their HLOS caps were already created), a `diag/*` branch could add an env-gated, default-off switch in `gunyah_arm_fdt_customize()`'s per-vector bell loop: with `GUNYAH_DIAG_DUP_MSI_SPI=1`, the **last** MSI bell keeps its own label but reuses the previous bell's SPI in `interrupts`. In public RM terms, the 4 fixed bells and MSI bell 0 are created (caps copied to HLOS); the last bell's `map_virq()` then hits the duplicate (`dict_add` → `ERROR_DENIED`), `handle_doorbell` fails, and `VM_INIT` returns `NORESOURCE`. That is the same external signature, with doorbells half-built. It's about 5 lines and needs `msi_vectors ≥ 2` (the keyboard's default). The vendor RM may detect the duplicate elsewhere (for example at parse time), so the 14.4 calibration step would apply first. Not implemented, since nothing can validate it until 14.4 has run.
+
+### 14.6 Bottom line
+
+The original rejection can't be reproduced on demand today. A deterministic rejection is possible without code changes (`-smp 16`, 14.3), and it should be indistinguishable from the original at the `5600000b` / `Error: 2` level. Because of 14.1 that external match is guaranteed by RM's error reporting, not by a shared cause. It tests the general "rejected `VM_INIT` leaks reboot-clearable state" theory. If that comes back negative, 14.5 is the remaining targeted test. If both are negative, record the original failure as **currently non-reproducible; revisit if it recurs**. If it does recur, capture full `dmesg` (not just `rejected` lines) **before** rebooting, plus `ps -A -o PID,STAT,NAME | grep qemu`, and check the 14.2 (a)–(c) indicators. Rebooting destroys the only evidence.
