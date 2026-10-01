@@ -22,6 +22,17 @@ void gunyah_set_swiotlb_size(uint64_t size);
 #define GUNYAH_MSI_SPI_BASE 16
 #define GUNYAH_MSI_PHANDLE 4
 #define GUNYAH_VM_RESTART_STATUS 82
+/*
+ * Exit status when GH_VM_START fails with ENODEV, i.e. the Resource Manager
+ * rejected VM_INIT. That can be a transient hypervisor-side resource race
+ * (objects of a just-destroyed VM are reclaimed asynchronously; see
+ * HANDOFF_README.md sections 16-17) rather than a permanent
+ * misconfiguration, so a launcher may relaunch QEMU after a short backoff,
+ * with a bounded number of attempts. Deliberately distinct from
+ * GUNYAH_VM_RESTART_STATUS: RM reports every vdevice-creation failure the
+ * same way, so a genuinely permanent rejection must not be retried forever.
+ */
+#define GUNYAH_VM_START_RETRY_STATUS 83
 
 #define TYPE_GUNYAH_ACCEL ACCEL_CLASS_NAME("gunyah")
 typedef struct GUNYAHState GUNYAHState;
