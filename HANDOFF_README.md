@@ -680,3 +680,36 @@ sh /data/local/tmp/cycle-retry.sh 0 20 retry_gap0
 ```
 
 Expected if 16.1 is right: `fail_retries_exhausted=0` and `fail_other=0`, with roughly 2 of 20 runs showing `PASS_AFTER_1_RETRY`, and `attempts.txt` showing those runs' `try0` with `code=83`. Optional sanity check that the bound works: the BAD `-smp 16` command as `GOOD_CMD` with `sh cycle-retry.sh 0 1 bad_bound` should end `FAIL_RETRIES_EXHAUSTED retries=3` after about 7 s of backoff.
+
+## 19. CONFIRMED on real hardware — the bounded retry eliminates the gap0 failures
+
+Both validations from section 18.2 were run on real hardware (Snapdragon 8 Elite / OnePlus 15) against the `fix/retry-on-vm-start-enodev` CI build, using `cycle-retry.sh` unmodified except for pointing `GOOD_CMD` at the new build directory.
+
+**`gap0` retry test** (`sh cycle-retry.sh 0 20 retry_gap0`), the exact back-to-back-launch scenario that showed 2/20 (10%) raw failures in section 17 without this change:
+
+```
+pass_first_try=18  pass_after_retry=2  fail_retries_exhausted=0  fail_other=0  unknown=0
+total_retries=2  (passes needing 1/2/3 retries: 2/0/0)
+```
+
+18 runs passed on the first attempt; runs 6 and 13 hit the `ENODEV` rejection (`GH_VM_START rejected (retryable): exiting with status 83`), retried once after the 1s backoff, and passed. Zero runs were lost. This is not a reduction in collision rate — it's the same ~10% collision rate as section 17, with every collision now caught and resolved by a single retry. It also matches the predicted shape from section 18.2 almost exactly (2/20 needing exactly 1 retry).
+
+**Retry-bound sanity check** (`sh cycle-retry-bad.sh 0 1 bad_bound`, `GOOD_CMD`'s `-smp` swapped to `16`, a genuinely permanent rejection per section 14.3):
+
+```
+bad_bound run 1 RETRY 1 after exit 83, backoff 1s
+bad_bound run 1 RETRY 2 after exit 83, backoff 2s
+bad_bound run 1 RETRY 3 after exit 83, backoff 4s
+bad_bound run 1 FAIL_RETRIES_EXHAUSTED retries=3
+```
+
+The bound works as designed: it retries exactly 3 times with the intended 1s/2s/4s backoff, then gives up and reports `FAIL_RETRIES_EXHAUSTED` rather than looping forever. A permanent misconfiguration is not masked by the mitigation — it still ends in a hard failure, just after ~7s instead of immediately, which a real launcher can treat as the final verdict.
+
+### 19.1 Bottom line
+
+The bounded retry mitigation (`GUNYAH_VM_START_RETRY_STATUS` = 83, `fix/retry-on-vm-start-enodev` @ `ca8ff7b`) is now validated on real hardware as both **effective** (eliminates the gap0 failure class entirely across 20 runs) and **safe** (does not retry indefinitely on a genuine, non-transient rejection). Combined with sections 16–17's root-cause analysis (Gunyah hypervisor RCU-deferred object reclaim racing a new VM's resource allocation during the brief window after a previous VM's teardown), this is the recommended fix for the original bug.
+
+Recommended next steps:
+- `fix/msi-low-spi-window` remains abandoned (falsified twice over, sections 12 and 17) and should not be merged.
+- `fix/retry-on-vm-start-enodev` is recommended for adoption. Since QEMU itself does not retry or sleep (by design — see 18.1's caveat that RM reports every vdevice failure identically, so retrying must stay a launcher-side, bounded decision), any real launcher (e.g. DroidVM) needs equivalent relaunch-on-exit-83 logic with a similar bounded backoff to get this protection in practice.
+- Whether/how to upstream or merge this branch to `main` has not been decided yet.
