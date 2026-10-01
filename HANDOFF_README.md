@@ -452,3 +452,85 @@ The dmesg check for `good7` came back empty for `gunyah`/`rejected` — but this
 **Status:** `fix/msi-low-spi-window` remains unconfirmed as fixing anything — this failure mode has nothing to do with SPI numbering, since `good7`'s rejected config is the same `SPI range 16-17` layout that passed 6 times before it. Do not merge to `main`. Next step: keep running BAD/GOOD pairs past 7 to see whether failures recur at a roughly fixed cadence (supporting a count-based threshold) or sporadically (supporting a load/timing-based explanation), and consider testing with deliberately shorter or longer gaps between runs to see if that changes the failure rate.
 
 **Pairs 8–10 (continuation):** ran 3 more pairs with the same template (`sleep 2` after each run, same ~2-second gap as pairs 1–7). All three passed cleanly — `bad8`/`bad9`/`bad10` rejected normally with clean teardown, `good8`/`good9`/`good10` all `VM_START OK` with no leftover process and no `WARNING` lines. **Final tally: 10 pairs run, only 1 unexpected failure (`good7`), which self-cleared on the immediate identical retry (`good7b`).** The failure did not recur at pair 8 (i.e., not "every 7th"), which argues against a simple fixed-count threshold and is more consistent with the sporadic/load-dependent framing. A ~10% failure rate on a valid config from a single sample is too small to pin down a precise mechanism, but it is enough to say: **this is not a simple monotonic leak, not tied to a specific pair count, and self-clears within seconds without a reboot.** One incidental note from this run: between pairs 7 and 8, Termux was force-stopped (not Ctrl+A X) after a guest hang at `(initramfs)`, which likely delivered an abrupt kill signal to `good7b`'s QEMU process after `VM_START OK` had already printed (release from `RUNNING` via signal, per 14.2's distinction) — this did not appear to affect pair 8's outcome, but is noted in case abrupt-kill-after-success turns out to matter for future tests.
+
+## 16. ANALYSIS — what could recover within seconds, a gap-sweep test to make the failure reproducible, and where this leaves `fix/msi-low-spi-window` (source-only, nothing run on hardware)
+
+### 16.1 The host kernel's teardown is synchronous; the asynchronous part is below it
+
+- **Android Gunyah driver (`drivers/virt/gunyah`, `android16-6.12`):** no workqueues, no `call_rcu`/`synchronize_rcu`, no kthreads, no sleeps or timeouts anywhere in the driver. VM teardown (`_gunyah_vm_put()`, 14.2) runs when the last VM/vCPU file reference is released. For an exiting QEMU that happens in the exiting task's own `exit_files`/`exit_task_work`, **before** `exit_notify`. So by the time the shell's `wait` returns, the kernel has already sent `VM_RESET`, waited for RM's `RESET` notification, and deallocated the VMID. **Nothing in the host driver can still be releasing the previous VM when the next QEMU starts.** (Vendor modules loaded on this phone, such as `gunyah_host_share`, `gh_hugepage_reserve` and `nproc_guard`, are out-of-tree and not examined.)
+- **Gunyah hypervisor (`quic/gunyah-hypervisor`):** every hypervisor object (doorbell, vCPU thread, VIC, address space, cspace cap table, …) is freed through `object_free_*()` → `rcu_enqueue()` (`hyp/core/object_standard/templates/object.c.tmpl`), and cap tables likewise (`cspace_destroy_cap_table` via `rcu_enqueue`). An object's memory goes back to its partition only **after an RCU grace period**. RM creates every VM object from its own partition (`gunyah_hyp_partition_create_doorbell(rm_get_rm_partition(), …)` etc.). So right after a teardown, memory RM has already "freed" can still be pending reclamation. A VM created in that window can hit a hypervisor allocation failure, which `vm_config_create_vdevices()` → `svm_init()` reports as `RM_ERROR_NORESOURCE` (14.1), i.e. `5600000b` / `Error: 2` / errno 19. Everything sits in the hypervisor/RM, out of the host's view, and clears by itself once the grace period finishes. **This is the only source-confirmed asynchronous mechanism on the path, and it matches every observation in section 15:** an isolated failure on a valid config, recovery within seconds without a reboot, and no host-side `WARNING`/reset-failure lines.
+- **Caveats:** Gunyah RCU grace periods are normally milliseconds. Recovery taking about a second would mean RCU processing is delayed on this phone (CPUs idle or in deep power states, RM's own vCPU not being scheduled) or that the vendor RM/hypervisor defers something slower, such as sanitizing lent memory. Neither is visible from public source. An alternative that also fits 1-in-10: **another Gunyah VM** on the phone (Qualcomm trusted VMs, `gunyah_qtvm.c`) briefly using the same RM resources at that moment.
+
+**Revised picture covering every observation so far (hypothesis):** RM has a finite pool of partition memory. Each VM's demand grows with vCPUs, doorbells (so MSI vectors) and VIC/address-space size. Memory from a just-destroyed VM returns to the pool only after an asynchronous reclaim. Before the section 9 reboot, after many rapid build-and-test cycles (and possibly leaked or fragmented partition memory), the margin was small. The extra per-vector doorbells were then enough to fail every time, which is why `msi_vectors > 0` failed 4/4 and `msi_vectors = 0` passed. After the reboot the margin is large, and only an unlucky rapid relaunch (pending reclaim) fails. This explains the original correlation with MSI without SPI numbering mattering, consistent with section 12's falsification.
+
+### 16.2 Making it reproducible: sweep the gap between VM lifecycles (copy-paste)
+
+GOOD→GOOD with no gap should stress pending reclamation the most, since a fully booted VM frees far more objects (6 vCPUs, all doorbells, a full address space) than a BAD run, which aborts in `handle_vcpu`. Run the **unchanged control-stock (`74874e2`) GOOD command** (keyboard, `msi_vectors=2`). Save as `/data/local/tmp/cycle.sh` and run as root:
+
+```sh
+#!/system/bin/sh
+# usage: sh cycle.sh <gap_seconds> <iterations> <tag>
+GAP=$1; N=$2; TAG=$3
+GOOD_CMD='<paste your exact GOOD qemu-system-aarch64 command here>'
+OUT=/data/local/tmp/cyc_$TAG; mkdir -p $OUT
+# kernel log is very noisy (section 15); stream the Gunyah lines continuously instead of reading after the fact
+dmesg -w 2>/dev/null | grep -iE "gunyah|rejected|Failed to (initialize|reset|deallocate)" > $OUT/dmesg.log &
+DPID=$!
+pass=0; fail=0; unk=0
+i=1
+while [ $i -le $N ]; do
+  log=$OUT/run_$i.log
+  echo "=== $TAG run $i start $(date +%s.%N)" >> $OUT/dmesg.log
+  sh -c "exec $GOOD_CMD" < /dev/null > /dev/null 2> $log &
+  pid=$!
+  t=0
+  while [ $t -lt 300 ]; do               # up to 30 s for an outcome
+    grep -qE "VM_START OK|errno=19" $log && break
+    sleep 0.1; t=$((t+1))
+  done
+  kill -9 $pid 2>/dev/null; wait $pid 2>/dev/null   # release from RUNNING (or INIT_FAILED)
+  if grep -q "VM_START OK" $log; then r=PASS; pass=$((pass+1))
+  elif grep -q "errno=19" $log; then r=FAIL; fail=$((fail+1))
+  else r=UNKNOWN; unk=$((unk+1)); fi
+  echo "$TAG run $i $r $(date +%s.%N)" | tee -a $OUT/summary.txt
+  [ "$GAP" != "0" ] && sleep $GAP
+  i=$((i+1))
+done
+kill $DPID 2>/dev/null
+echo "$TAG gap=$GAP pass=$pass fail=$fail unknown=$unk" | tee -a $OUT/summary.txt
+ps -A -o PID,STAT,NAME | grep qemu    # expect nothing
+```
+
+Run in this order, rebooting **only** if a phase leaves VMs persistently failing:
+
+```sh
+sh /data/local/tmp/cycle.sh 10 10 gap10   # control: expect 0 failures
+sh /data/local/tmp/cycle.sh 2  20 gap2    # section 15's spacing: expect ~0-10%
+sh /data/local/tmp/cycle.sh 0  20 gap0    # back-to-back: the hypothesis predicts clearly more failures
+```
+
+- **Gap effect:** if failures cluster at `gap0` and disappear at `gap10`, we have an on-demand repro and the timing explanation is confirmed. If the rate doesn't depend on the gap, timing isn't the cause, and the "another Gunyah VM on the phone" alternative (16.1) moves up.
+- **Demand effect (only if `gap0` still fails rarely):** rerun `gap0` with a heavier but still valid GOOD config: `-smp 8,sockets=1,cores=8,threads=1` (the platform maximum) plus `-device virtio-tablet-pci -device virtio-mouse-pci` (6 MSI vectors in total). The margin hypothesis predicts a higher failure rate with higher per-VM demand. That would also bring back the original section 9 "more MSI vectors, more failures" correlation.
+- For every `FAIL`, keep `run_N.log` and the matching `dmesg.log` segment (between the `=== … start` markers). The streamed capture avoids the ring-buffer rotation that lost `good7`'s dmesg line.
+
+`kill -9` matches 14.2: teardown from `RUNNING` takes the same kernel path as a clean QEMU exit. If the guest command uses a `server=on,wait=on` serial socket, either switch it to `wait=off` for this test or attach a client, otherwise QEMU blocks before `GH_VM_START` and every run reads `UNKNOWN`.
+
+### 16.3 `fix/msi-low-spi-window`: recommend abandoning it as a bug fix
+
+- Its premise, that RM rejects doorbell label/SPI ≥ 0x10, is falsified (section 12: SPI 16–17 passes on stock; section 15: the same SPI 16–17 config fails once and then passes). Nothing it changes is related to a rejection that depends on timing or capacity.
+- It has a real cost: a hard cap of 12 MSI vectors, with warnings and fewer queues per device for realistic multi-device configs. **Recommendation: don't merge it.** Keep the branch only as the README's record, or cherry-pick just the README commits to `main`.
+
+### 16.4 Retry-on-rejection: feasible, but only by relaunching the VM — high-level sketch (not implemented)
+
+- **No in-process retry on the same VM.** After a rejection the kernel leaves the VM in `INIT_FAILED`. A second `GH_VM_START` ioctl returns `-ENODEV` at once (`gunyah_vm_ensure_started()` only starts from `NO_STATE`). A retry needs the VM fd fully released (teardown, 14.2) and a new VM created: a new `GH_CREATE_VM`, every memory lend, every vCPU/IRQFD function, the DTB config and the boot context. QEMU's Gunyah accel does all of that during machine init, so redoing it inside one QEMU process would be a large refactor.
+- **`errno=19` can't be classified as transient.** Every `create_vdevices` failure becomes `NORESOURCE` (14.1), so a deterministic misconfiguration (for example `-smp 16`) looks the same as a transient failure. Retries must therefore be bounded.
+- **Recommended shape (process-level retry):**
+  1. QEMU: in `gunyah_start_vm()`, when `GH_VM_START` fails with `ENODEV`, log `GH_VM_START rejected (retryable)` and exit with a **new dedicated status** (for example 83, `GUNYAH_VM_START_RETRY_STATUS`), instead of `exit(1)`. Don't reuse 82: `GUNYAH_VM_RESTART_STATUS` already means "guest requested reset" (PSCI `SYSTEM_RESET`), and a launcher that relaunches on 82 immediately would loop forever on a deterministic rejection.
+  2. Launcher (the DroidVM app or a shell wrapper): on exit 83, wait and relaunch with backoff (1 s, 2 s, 4 s), at most 3 attempts. Then report the failure as permanent, with the last stderr/dmesg attached.
+  - About 5 lines of QEMU code plus launcher logic. Since teardown has finished by the time the process exits (16.1), the backoff is purely for the RM/hypervisor side to catch up.
+- **Alternative without launcher changes:** QEMU re-`exec`s itself after a delay, with an attempt counter in the environment. That is riskier: every fd that isn't close-on-exec (Gunyah VM/vCPU fds included) would survive and block teardown, and the serial/QMP sockets DroidVM is connected to would drop. Not recommended.
+- **Validation:** use the 16.2 `gap0` loop with the retrying build and a wrapper. The failure rate after retries should be zero, while the logs show the retries happening.
+
+### 16.5 Bottom line
+
+The evidence now points to a transient, capacity/timing-dependent rejection inside RM or the hypervisor. The likeliest source-backed mechanism is the hypervisor reclaiming freed objects via RCU, with a pool margin that shrinks under load. SPI numbering is not the cause. Next: run 16.2 to get a repro rate that depends on the gap. If it confirms the gap effect, the practical mitigation is the bounded process-level retry in 16.4, plus a short spacing between back-to-back launches. A QEMU-only fix for an RM-internal reclaim delay isn't possible.
