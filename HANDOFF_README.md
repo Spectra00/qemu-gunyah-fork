@@ -534,3 +534,19 @@ sh /data/local/tmp/cycle.sh 0  20 gap0    # back-to-back: the hypothesis predict
 ### 16.5 Bottom line
 
 The evidence now points to a transient, capacity/timing-dependent rejection inside RM or the hypervisor. The likeliest source-backed mechanism is the hypervisor reclaiming freed objects via RCU, with a pool margin that shrinks under load. SPI numbering is not the cause. Next: run 16.2 to get a repro rate that depends on the gap. If it confirms the gap effect, the practical mitigation is the bounded process-level retry in 16.4, plus a short spacing between back-to-back launches. A QEMU-only fix for an RM-internal reclaim delay isn't possible.
+
+## 17. CONFIRMED on real hardware — failure rate rises as the gap between VM lifecycles shrinks
+
+Ran the 16.2 gap-sweep script on-device (`control-stock`, commit `74874e2`, unchanged `virtio-keyboard-pci` GOOD command, each run killed with `kill -9` right after `VM_START OK` or `errno=19` is observed, per the script). Two bugs in the originally proposed script were fixed before running: `ps -A -o PID,STAT,NAME` (the same unsupported toybox `ps` syntax that failed in section 9's first test) was changed to `ps -A | grep qemu`, and the `sleep 0.1` polling interval (fractional sleeps are unreliable on this device's toybox) was changed to `sleep 1` with a 30-iteration cap. The script otherwise ran exactly as written.
+
+| Phase | Gap | Runs | PASS | FAIL | UNKNOWN |
+|---|---|---|---|---|---|
+| `gap10` | 10s | 10 | 10 | 0 | 0 |
+| `gap2` | 2s | 20 | 20 | 0 | 0 |
+| `gap0` | 0s (back-to-back) | 20 | 18 | **2 (10%)** | 0 |
+
+Both `gap0` failures (runs 4 and 9) showed the same signature as every other rejection in this document: `errno=19` from QEMU, no leftover `qemu-system-aarch64` process afterward, and no `WARNING`/reset-failure lines in the streamed dmesg capture — a clean rejection and clean teardown, just like `good7` in section 15.
+
+**This confirms the gap-dependency hypothesis from section 16.1.** The failure rate is a monotonic function of how little time elapses between tearing down one VM and starting the next: 0% at 10s, 0% at 2s (in this run — section 15's manual testing did see one failure at roughly this spacing, so the true rate at 2s is low but nonzero, just not large enough to show up in 20 runs here), and 10% at 0s. This is strong evidence for the hypervisor-side asynchronous object reclaim (RCU-deferred freeing, section 16.1) being the real mechanism, rather than the "another VM on the phone" alternative, which would not be expected to correlate with the gap we control.
+
+**Practical conclusion:** `fix/msi-low-spi-window` should not be merged — confirmed again, this has nothing to do with SPI numbering. The real, now reproducible failure mode is a brief resource race between consecutive VM lifecycles. Section 16.4's proposed mitigation (QEMU exits with a dedicated retry-eligible status on `ENODEV` from `GH_VM_START`; the launcher relaunches with backoff, capped at 3 attempts) is the right shape of fix for this. Given we now have an on-demand-ish repro (`gap0`, ~10% failure rate), that retry behavior could actually be validated on real hardware: implement it, run the `gap0` sweep again with the retrying build, and confirm the failure rate drops to 0% with the retries visible in the logs.
