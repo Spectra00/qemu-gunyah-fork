@@ -254,7 +254,14 @@ void gunyah_start_vm(void) {
   }
   ret = gunyah_vm_ioctl(GH_VM_START);
   if (ret != 0) {
-    gh_report("Failed to start VM: %s (errno=%d)", strerror(errno), errno);
+    int err = errno;
+
+    gh_report("Failed to start VM: %s (errno=%d)", strerror(err), err);
+    if (err == ENODEV) {
+      gh_report("GH_VM_START rejected (retryable): exiting with status %d",
+                GUNYAH_VM_START_RETRY_STATUS);
+      exit(GUNYAH_VM_START_RETRY_STATUS);
+    }
     exit(1);
   }
   gh_report("VM_START OK");
