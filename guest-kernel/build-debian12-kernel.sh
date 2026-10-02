@@ -53,9 +53,19 @@ for o in PCI_HOST_GENERIC VIRTIO VIRTIO_PCI VIRTIO_PCI_LIB VIRTIO_PCI_LIB_LEGACY
          VIRTIO_BLK VIRTIO_NET NET_FAILOVER FAILOVER VIRTIO_CONSOLE \
          HW_RANDOM HW_RANDOM_VIRTIO VIRTIO_INPUT \
          EXT4_FS JBD2 FS_MBCACHE CRC16 CRYPTO_CRC32C LIBCRC32C \
-         EFI_PARTITION MSDOS_PARTITION; do
+         EFI_PARTITION MSDOS_PARTITION \
+         FAT_FS VFAT_FS ISO9660_FS JOLIET ZISOFS \
+         NLS NLS_CODEPAGE_437 NLS_ISO8859_1 NLS_ASCII NLS_UTF8 \
+         AUTOFS_FS \
+         USB_SUPPORT USB USB_PCI USB_XHCI_HCD USB_XHCI_PCI HID HID_GENERIC USB_HID; do
   $S --enable "$o"
 done
+# The stock rootfs has no /lib/modules for this kernel, so everything the
+# boot needs before modules can be installed must be built in:
+#  - FAT: /boot/efi (vda15) is in fstab; a failed mount drops systemd into
+#    emergency mode with a locked root account.
+#  - FAT/ISO9660 + NLS: cloud-init NoCloud seed disks (label "cidata").
+#  - xHCI + USB HID: DroidVM's qemu-xhci with usb-tablet / usb-kbd.
 # Distinct release name; no Debian signing certs in a source build.
 $S --set-str LOCALVERSION "-gunyah-rdma" --disable LOCALVERSION_AUTO
 $S --set-str SYSTEM_TRUSTED_KEYS "" --set-str SYSTEM_REVOCATION_KEYS ""
@@ -72,7 +82,9 @@ echo "=== config check"
 fail=0
 for o in DMA_RESTRICTED_POOL SWIOTLB OF_RESERVED_MEM PCI_HOST_GENERIC VIRTIO \
          VIRTIO_PCI VIRTIO_BLK VIRTIO_NET VIRTIO_CONSOLE HW_RANDOM_VIRTIO \
-         VIRTIO_INPUT EXT4_FS EFI_PARTITION MSDOS_PARTITION; do
+         VIRTIO_INPUT EXT4_FS EFI_PARTITION MSDOS_PARTITION \
+         VFAT_FS ISO9660_FS NLS_CODEPAGE_437 NLS_ISO8859_1 NLS_ASCII NLS_UTF8 \
+         AUTOFS_FS USB_XHCI_HCD USB_XHCI_PCI HID_GENERIC USB_HID; do
   if grep -qx "CONFIG_$o=y" .config; then
     echo "  CONFIG_$o=y"
   else
@@ -98,8 +110,10 @@ cat > "$OUT/BUILD-INFO.txt" <<INFO
 kernel release : $KR
 source package : $SRC_DEB
 config base    : $IMG_DEB
-changes        : CONFIG_DMA_RESTRICTED_POOL=y; virtio-pci/blk/net/console/
-                 rng/input, ext4, EFI/MSDOS partitions built in (=y);
+changes        : CONFIG_DMA_RESTRICTED_POOL=y; built in (=y): virtio-pci/
+                 blk/net/console/rng/input, ext4, vfat, iso9660, NLS
+                 cp437/iso8859-1/ascii/utf8, autofs, EFI/MSDOS partitions,
+                 xHCI + USB HID;
                  LOCALVERSION=-gunyah-rdma; no debug info; Debian signing
                  certs not used.
 INFO
