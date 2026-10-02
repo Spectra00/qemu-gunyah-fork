@@ -104,7 +104,8 @@ fi
 grep -qE "EXT4-fs \(vda1\): mounted" "$LOG" && echo "PASS root mounted from vda1 (no initrd)" || { echo "FAIL root not mounted"; st=1; }
 [ $ok = 1 ] && echo "PASS reached login prompt" || { echo "FAIL no login prompt"; st=1; }
 grep -q "Initialized virtio_gpu" "$LOG" && echo "PASS virtio_gpu DRM driver initialized" || { echo "FAIL virtio_gpu not initialized"; st=1; }
-grep -qE "fbcon: .*\\(fb0\\) is primary device" "$LOG" && echo "PASS fbcon on fb0" || { echo "FAIL fbcon not bound"; st=1; }
+grep -q "fb0: virtio_gpudrmfb frame buffer device" "$LOG" && echo "PASS fb0 is virtio-gpu's fbdev" || { echo "FAIL no virtio-gpu fb0"; st=1; }
+grep -q "Console: switching to colour frame buffer device" "$LOG" && echo "PASS fbcon took over the console" || { echo "FAIL fbcon not bound"; st=1; }
 if [ -s "$SHOT.ppm" ]; then
   python3 "$(dirname "$0")/screen-check.py" lit "$SHOT.ppm" "$SHOT.png" && echo "PASS screendump is not blank" || { echo "FAIL screendump is blank"; st=1; }
   tesseract "$SHOT.png" "$SHOT" >/dev/null 2>&1 || true

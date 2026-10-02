@@ -37,7 +37,7 @@ def lit(ppm, png):
     n = sum(1 for p in px if max(p) > 64)
     print(f"screendump {im.size[0]}x{im.size[1]}, {n} lit pixels "
           f"({100 * n / len(px):.2f}%)")
-    return 0 if n > 2000 else 1
+    return 0 if n > 300 else 1  # a cleared tty1 with its 2-line prompt: ~1.3k
 
 
 if __name__ == "__main__":
