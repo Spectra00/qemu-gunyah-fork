@@ -45,7 +45,7 @@ commonCFlags="-O3 -flto=thin -ffunction-sections -fdata-sections -fomit-frame-po
 libraryCFlags="$commonCFlags -DNDEBUG"
 commonLdFlags="-flto=thin -Wl,--lto-O3 -Wl,-O3 -Wl,--gc-sections -Wl,--icf=all"
 qemuCFlags="$commonCFlags -fno-unwind-tables -fno-asynchronous-unwind-tables -mbranch-protection=none -Wno-error -I$prefix/include -I$prefix/include/pixman-1"
-qemuLdFlags="-L$prefix/lib $commonLdFlags -Wl,-s -lucontext"
+qemuLdFlags="-L$prefix/lib $commonLdFlags -lucontext"
 for tool in cmake curl git make meson ninja patchelf perl pkg-config python3 tar; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "缺少工具: $tool" >&2

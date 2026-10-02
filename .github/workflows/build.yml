@@ -38,3 +38,12 @@ jobs:
         with:
           name: qemu-gunyah-arm64
           path: build/out/qemu-gunyah/
+
+      # The build-tree binary keeps its symbols (packageQemu strips only the
+      # shipped copies), so crash backtraces such as
+      # "qemu-system-aarch64+0x1234" can be resolved with addr2line.
+      - name: Upload unstripped binary (symbols)
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-gunyah-arm64-symbols
+          path: build/qemu/qemu-system-aarch64
