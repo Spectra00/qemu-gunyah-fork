@@ -288,6 +288,15 @@ QemuOpts *qemu_chr_parse_compat(const char *label, const char *filename,
         qemu_opt_set(opts, "backend", filename, &error_abort);
         return opts;
     }
+    if (strstart(filename, "unix:", &p)) {
+        qemu_opt_set(opts, "backend", "socket", &error_abort);
+        if (!qemu_opts_do_parse(opts, p, "path", &local_err)) {
+            error_report_err(local_err);
+            qemu_opts_del(opts);
+            return NULL;
+        }
+        return opts;
+    }
 
     error_report("'%s' is not a valid char driver", filename);
     qemu_opts_del(opts);
@@ -554,6 +563,15 @@ QemuOptsList qemu_chardev_opts = {
         {
             .name = "backend",
             .type = QEMU_OPT_STRING,
+        },{
+            .name = "path",
+            .type = QEMU_OPT_STRING,
+        },{
+            .name = "server",
+            .type = QEMU_OPT_BOOL,
+        },{
+            .name = "wait",
+            .type = QEMU_OPT_BOOL,
         },{
             .name = "mux",
             .type = QEMU_OPT_BOOL,

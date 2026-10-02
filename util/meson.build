@@ -59,4 +59,5 @@ if have_block
   util_ss.add(files('qemu-coroutine-sleep.c'))
   util_ss.add(files('readline.c'))
   util_ss.add(files('timed-average.c'))
+  util_ss.add(files('yank.c'))
 endif

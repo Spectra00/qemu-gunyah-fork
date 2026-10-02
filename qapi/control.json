@@ -1,4 +1,12 @@
 
+
+{ 'command': 'qmp_capabilities',
+  'data': { '*enable': [ 'QMPCapability' ] },
+  'allow-preconfig': true }
+
+{ 'enum': 'QMPCapability',
+  'data': [ 'oob' ] }
+
 { 'struct': 'VersionTriple',
   'data': {'major': 'int', 'minor': 'int', 'micro': 'int'} }
 
@@ -8,11 +16,20 @@
 { 'command': 'query-version', 'returns': 'VersionInfo',
   'allow-preconfig': true }
 
+{ 'struct': 'CommandInfo', 'data': {'name': 'str'} }
+
+{ 'command': 'query-commands', 'returns': ['CommandInfo'],
+  'allow-preconfig': true }
+
 { 'command': 'quit',
   'allow-preconfig': true }
+
+{ 'enum': 'MonitorMode', 'data': [ 'readline', 'control' ] }
 
 { 'struct': 'MonitorOptions',
   'data': {
       '*id': 'str',
+      '*mode': 'MonitorMode',
+      '*pretty': 'bool',
       'chardev': 'str'
   } }

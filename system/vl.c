@@ -830,7 +830,7 @@ static int mon_init_func(void *opaque, QemuOpts *opts, Error **errp)
     return monitor_init_opts(opts, errp);
 }
 
-static void monitor_parse(const char *str)
+static void monitor_parse(const char *str, const char *mode, bool pretty)
 {
     static int monitor_device_index = 0;
     QemuOpts *opts;
@@ -850,7 +850,13 @@ static void monitor_parse(const char *str)
     }
 
     opts = qemu_opts_create(qemu_find_opts("mon"), label, 1, &error_fatal);
+    qemu_opt_set(opts, "mode", mode, &error_abort);
     qemu_opt_set(opts, "chardev", label, &error_abort);
+    if (!strcmp(mode, "control")) {
+        qemu_opt_set_bool(opts, "pretty", pretty, &error_abort);
+    } else {
+        assert(pretty == false);
+    }
     monitor_device_index++;
 }
 
@@ -958,7 +964,7 @@ static void qemu_create_default_devices(void)
                 add_device_config(DEV_SERIAL, "stdio");
             }
             if (default_monitor) {
-                monitor_parse("stdio");
+                monitor_parse("stdio", "readline", false);
             }
         }
     } else {
@@ -969,7 +975,7 @@ static void qemu_create_default_devices(void)
             add_device_config(DEV_PARALLEL, vc ?: "null");
         }
         if (default_monitor && vc) {
-            monitor_parse(vc);
+            monitor_parse(vc, "readline", false);
         }
     }
 
@@ -2300,8 +2306,16 @@ void qemu_init(int argc, char **argv)
             case QEMU_OPTION_monitor:
                 default_monitor = 0;
                 if (strncmp(optarg, "none", 4)) {
-                    monitor_parse(optarg);
+                    monitor_parse(optarg, "readline", false);
                 }
+                break;
+            case QEMU_OPTION_qmp:
+                monitor_parse(optarg, "control", false);
+                default_monitor = 0;
+                break;
+            case QEMU_OPTION_qmp_pretty:
+                monitor_parse(optarg, "control", true);
+                default_monitor = 0;
                 break;
             case QEMU_OPTION_mon:
                 opts = qemu_opts_parse_noisily(qemu_find_opts("mon"), optarg,

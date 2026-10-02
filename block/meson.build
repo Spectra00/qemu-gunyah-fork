@@ -4,6 +4,7 @@ block_ss.add(files(
   'block-backend.c',
   'graph-lock.c',
   'io.c',
+  'progress_meter.c',
   'raw-format.c',
 ))
 
