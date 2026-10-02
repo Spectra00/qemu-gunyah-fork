@@ -53,6 +53,7 @@ if have_block or have_ga or have_user
 endif
 if have_block
   util_ss.add(files('aio-wait.c'))
+  util_ss.add(files('buffer.c'))
   util_ss.add(files('bufferiszero.c'))
   util_ss.add(files('iov.c'))
   util_ss.add(files('block-helpers.c'))

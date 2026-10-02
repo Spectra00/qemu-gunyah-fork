@@ -1,0 +1,17 @@
+config USB
+    bool
+
+config USB_XHCI
+    bool
+    select USB
+
+config USB_XHCI_PCI
+    bool
+    default y if PCI_DEVICES || PCIE_DEVICES
+    depends on PCI
+    select USB_XHCI
+
+config USB_HID
+    bool
+    default y
+    depends on USB

@@ -1527,6 +1527,25 @@ SRST
     OBP.
 ERST
 
+#ifdef CONFIG_VNC
+DEF("vnc", HAS_ARG, QEMU_OPTION_vnc ,
+    "-vnc <display>  shorthand for -display vnc=<display>\n", QEMU_ARCH_ALL)
+#endif
+SRST
+``-vnc display[,option[,option[,...]]]``
+    Listen for VNC clients on display ``host:d`` (TCP port 5900+d),
+    ``unix:path`` or ``none``. This build only serves unauthenticated
+    connections: ``password``, ``password-secret``, ``sasl``,
+    ``tls-creds``, ``tls-authz``, ``sasl-authz`` and ``websocket`` are
+    rejected. Keysyms are mapped with the en-us layout.
+
+    Supported options: ``to=L``, ``ipv4=on|off``, ``ipv6=on|off``,
+    ``reverse=on|off``, ``share=allow-exclusive|force-shared|ignore``,
+    ``connections=n``, ``display=dev[,head=n]``, ``lock-key-sync=on|off``,
+    ``key-delay-ms=n``, ``non-adaptive=on|off``, ``audiodev=id``,
+    ``power-control=on|off``.
+ERST
+
 ARCHHEADING(, QEMU_ARCH_I386)
 
 ARCHHEADING(i386 target only:, QEMU_ARCH_I386)

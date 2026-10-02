@@ -73,6 +73,13 @@ enum qemu_color_names {
 #define QEMU_KEY_CTRL_PAGEUP     0xe406
 #define QEMU_KEY_CTRL_PAGEDOWN   0xe407
 
+typedef void QEMUPutLEDEvent(void *opaque, int ledstate);
+typedef struct QEMUPutLEDEntry QEMUPutLEDEntry;
+
+QEMUPutLEDEntry *qemu_add_led_event_handler(QEMUPutLEDEvent *func, void *opaque);
+void qemu_remove_led_event_handler(QEMUPutLEDEntry *entry);
+void kbd_put_ledstate(int ledstate);
+
 void qemu_text_console_put_keysym(QemuTextConsole *s, int keysym);
 bool qemu_text_console_put_qcode(QemuTextConsole *s, int qcode, bool ctrl);
 void qemu_text_console_put_string(QemuTextConsole *s, const char *str, int len);
@@ -386,6 +393,13 @@ bool qemu_display_find_default(DisplayOptions *opts);
 void qemu_display_early_init(DisplayOptions *opts);
 void qemu_display_init(DisplayState *ds, DisplayOptions *opts);
 const char *qemu_display_get_vc(DisplayOptions *opts);
+
+/* vnc.c */
+void vnc_display_init(const char *id, Error **errp);
+void vnc_display_open(const char *id, Error **errp);
+void vnc_display_add_client(const char *id, int csock, bool skipauth);
+void vnc_parse(const char *str);
+int vnc_init_func(void *opaque, QemuOpts *opts, Error **errp);
 void qemu_display_help(void);
 
 #ifdef CONFIG_LINUX

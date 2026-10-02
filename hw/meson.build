@@ -11,6 +11,7 @@ subdir('nvram')
 subdir('pci')
 subdir('pci-host')
 subdir('rtc')
+subdir('usb')
 subdir('virtio')
 
 subdir('arm')
