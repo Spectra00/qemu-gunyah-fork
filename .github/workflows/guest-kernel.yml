@@ -59,7 +59,7 @@ jobs:
       - name: Install QEMU and tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-arm qemu-utils device-tree-compiler fdisk
+          sudo apt-get install -y qemu-system-arm qemu-utils device-tree-compiler fdisk python3-pil tesseract-ocr
       - name: Fetch Debian 12 genericcloud arm64 image
         run: |
           curl -fsSL -o deb.qcow2 https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2
@@ -79,4 +79,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: debian12-gunyah-kernel-boot-log
-          path: boot-*.log
+          path: |
+            boot-*.log
+            screen-*.png
+            screen-*.txt

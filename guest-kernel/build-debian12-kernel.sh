@@ -12,6 +12,8 @@
 #   - CONFIG_DMA_RESTRICTED_POOL=y
 #   - virtio-pci/blk/net/console/rng/input, ext4 and partition parsers
 #     built in, so the kernel boots root=PARTUUID=... without an initrd.
+#   - a 2D display: virtio-gpu DRM with fbdev emulation and fbcon, so
+#     tty1 shows on a virtio-gpu-pci screen (DroidVM's VNC console).
 # Runs inside a debian:bookworm container (native cross gcc-12).
 set -euo pipefail
 
@@ -57,7 +59,9 @@ for o in PCI_HOST_GENERIC VIRTIO VIRTIO_PCI VIRTIO_PCI_LIB VIRTIO_PCI_LIB_LEGACY
          FAT_FS VFAT_FS ISO9660_FS JOLIET ZISOFS \
          NLS NLS_CODEPAGE_437 NLS_ISO8859_1 NLS_ASCII NLS_UTF8 \
          AUTOFS_FS \
-         USB_SUPPORT USB USB_PCI USB_XHCI_HCD USB_XHCI_PCI HID HID_GENERIC USB_HID; do
+         USB_SUPPORT USB USB_PCI USB_XHCI_HCD USB_XHCI_PCI HID HID_GENERIC USB_HID \
+         DRM DRM_KMS_HELPER DRM_VIRTIO_GPU DRM_FBDEV_EMULATION DRM_SIMPLEDRM \
+         FB FRAMEBUFFER_CONSOLE VT VT_CONSOLE INPUT_EVDEV; do
   $S --enable "$o"
 done
 # The stock rootfs has no /lib/modules for this kernel, so everything the
@@ -66,8 +70,12 @@ done
 #    emergency mode with a locked root account.
 #  - FAT/ISO9660 + NLS: cloud-init NoCloud seed disks (label "cidata").
 #  - xHCI + USB HID: DroidVM's qemu-xhci with usb-tablet / usb-kbd.
+#  - virtio-gpu DRM + fbdev emulation + fbcon: the console on tty1 is on
+#    screen from the first kernel message, before any module could load;
+#    evdev so Xorg/Wayland see the virtio/USB input devices. simpledrm is
+#    only a fallback for a firmware-provided simple-framebuffer node.
 # Distinct release name; no Debian signing certs in a source build.
-$S --set-str LOCALVERSION "-gunyah-rdma" --disable LOCALVERSION_AUTO
+$S --set-str LOCALVERSION "-gunyah-rdma-drm" --disable LOCALVERSION_AUTO
 $S --set-str SYSTEM_TRUSTED_KEYS "" --set-str SYSTEM_REVOCATION_KEYS ""
 $S --set-str BUILD_SALT "qemu-gunyah"
 # No debug info: smaller and faster, and BTF would need pahole.
@@ -84,7 +92,9 @@ for o in DMA_RESTRICTED_POOL SWIOTLB OF_RESERVED_MEM PCI_HOST_GENERIC VIRTIO \
          VIRTIO_PCI VIRTIO_BLK VIRTIO_NET VIRTIO_CONSOLE HW_RANDOM_VIRTIO \
          VIRTIO_INPUT EXT4_FS EFI_PARTITION MSDOS_PARTITION \
          VFAT_FS ISO9660_FS NLS_CODEPAGE_437 NLS_ISO8859_1 NLS_ASCII NLS_UTF8 \
-         AUTOFS_FS USB_XHCI_HCD USB_XHCI_PCI HID_GENERIC USB_HID; do
+         AUTOFS_FS USB_XHCI_HCD USB_XHCI_PCI HID_GENERIC USB_HID \
+         DRM DRM_KMS_HELPER DRM_VIRTIO_GPU DRM_FBDEV_EMULATION \
+         FB FRAMEBUFFER_CONSOLE VT VT_CONSOLE INPUT_EVDEV; do
   if grep -qx "CONFIG_$o=y" .config; then
     echo "  CONFIG_$o=y"
   else
@@ -113,8 +123,9 @@ config base    : $IMG_DEB
 changes        : CONFIG_DMA_RESTRICTED_POOL=y; built in (=y): virtio-pci/
                  blk/net/console/rng/input, ext4, vfat, iso9660, NLS
                  cp437/iso8859-1/ascii/utf8, autofs, EFI/MSDOS partitions,
-                 xHCI + USB HID;
-                 LOCALVERSION=-gunyah-rdma; no debug info; Debian signing
+                 xHCI + USB HID, virtio-gpu DRM + fbdev emulation +
+                 fbcon, simpledrm, evdev;
+                 LOCALVERSION=-gunyah-rdma-drm; no debug info; Debian signing
                  certs not used.
 INFO
 (cd "$OUT" && sha256sum vmlinuz-* config-* System.map-* modules-* > SHA256SUMS)

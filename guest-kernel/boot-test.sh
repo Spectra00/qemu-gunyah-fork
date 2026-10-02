@@ -9,6 +9,10 @@
 # Root is the stock Debian 12 genericcloud arm64 image, mounted by PARTUUID
 # with no initrd. TCG cannot reproduce LEND memory, so this checks that the
 # kernel boots, binds the pool and mounts root, not the SIGBUS itself.
+#
+# The display is DroidVM's 2D virtio-gpu-pci screen. After the serial login
+# prompt the test takes a QMP screendump of that screen (the surface QEMU's
+# VNC server serves) and checks tty1's login prompt is drawn on it.
 set -euo pipefail
 K=$1        # vmlinuz
 IMG=$2      # raw disk image
@@ -26,7 +30,8 @@ QARGS=(-M virt,gic-version=3 -cpu max,pauth-impdef=on -smp 2 -m 1024 -nodefaults
        -device "virtio-blk-pci,drive=d0,disable-legacy=on$AP"
        -device "virtio-rng-pci,disable-legacy=on$AP"
        -netdev user,id=n0
-       -device "virtio-net-pci,netdev=n0,disable-legacy=on$AP")
+       -device "virtio-net-pci,netdev=n0,disable-legacy=on$AP"
+       -device "virtio-gpu-pci,disable-legacy=on,disable-modern=off,xres=1280,yres=720,edid=on$AP")
 
 qemu-system-aarch64 "${QARGS[@]}" -machine dumpdtb=virt.dtb
 dtc -q -I dtb -O dts -o virt.dts virt.dtb
@@ -62,12 +67,13 @@ grep -n -A6 "reserved-memory\|memory-region\|memory@" virt-rdma.dts | head -30
 
 # cloud-init=disabled: the stock image otherwise spends ~280 s probing for
 # a cloud metadata source before the login prompt (test-only).
-APPEND="root=PARTUUID=$PU rootwait ro console=ttyAMA0 hung_task_timeout_secs=30 hung_task_panic=0 cloud-init=disabled"
+APPEND="root=PARTUUID=$PU rootwait ro console=tty0 console=ttyAMA0 hung_task_timeout_secs=30 hung_task_panic=0 cloud-init=disabled"
 if [ "$MODE" = rdma ]; then DTB=(-dtb virt-rdma.dtb); else DTB=(); fi
 echo "cmdline: $APPEND"
 : > "$LOG"
 timeout $((WAIT + 30)) qemu-system-aarch64 "${QARGS[@]}" "${DTB[@]}" \
-  -kernel "$K" -append "$APPEND" -serial "file:$LOG" &
+  -kernel "$K" -append "$APPEND" -serial "file:$LOG" \
+  -qmp "unix:qmp-$MODE.sock,server=on,wait=off" &
 QPID=$!
 ok=0
 for i in $(seq 1 "$WAIT"); do
@@ -76,13 +82,19 @@ for i in $(seq 1 "$WAIT"); do
   kill -0 $QPID 2>/dev/null || break
   sleep 1
 done
+SHOT=screen-$MODE
+rm -f "$SHOT".*
+if [ $ok = 1 ]; then
+  sleep 5   # let getty@tty1 draw its prompt as well
+  python3 "$(dirname "$0")/screen-check.py" dump "qmp-$MODE.sock" "$PWD/$SHOT.ppm" || true
+fi
 kill $QPID 2>/dev/null || true
 wait $QPID 2>/dev/null || true
 
 echo "=================== [$MODE] last 80 console lines"
 tail -n 80 "$LOG" | sed 's/\x1b\[[0-9;]*m//g'
 echo "=================== [$MODE] key lines"
-grep -nE "Linux version|Kernel command line|restricted DMA pool|assigned reserved memory|software IO TLB|virtio_blk|vda|EXT4-fs|VFS:|Kernel panic|Run /sbin/init|Debian GNU/Linux|login:|blocked for more than|swiotlb|DMA: Out of|Call trace" "$LOG" || true
+grep -nE "virtio_gpu|virtio-gpu|\\[drm\\]|fbcon|frame buffer device|Linux version|Kernel command line|restricted DMA pool|assigned reserved memory|software IO TLB|virtio_blk|vda|EXT4-fs|VFS:|Kernel panic|Run /sbin/init|Debian GNU/Linux|login:|blocked for more than|swiotlb|DMA: Out of|Call trace" "$LOG" || true
 echo "=================== [$MODE] checks"
 st=0
 if [ "$MODE" = rdma ]; then
@@ -91,4 +103,15 @@ grep -q "assigned reserved memory node restricted_dma_reserved" "$LOG" && echo "
 fi
 grep -qE "EXT4-fs \(vda1\): mounted" "$LOG" && echo "PASS root mounted from vda1 (no initrd)" || { echo "FAIL root not mounted"; st=1; }
 [ $ok = 1 ] && echo "PASS reached login prompt" || { echo "FAIL no login prompt"; st=1; }
+grep -q "Initialized virtio_gpu" "$LOG" && echo "PASS virtio_gpu DRM driver initialized" || { echo "FAIL virtio_gpu not initialized"; st=1; }
+grep -qE "fbcon: .*\\(fb0\\) is primary device" "$LOG" && echo "PASS fbcon on fb0" || { echo "FAIL fbcon not bound"; st=1; }
+if [ -s "$SHOT.ppm" ]; then
+  python3 "$(dirname "$0")/screen-check.py" lit "$SHOT.ppm" "$SHOT.png" && echo "PASS screendump is not blank" || { echo "FAIL screendump is blank"; st=1; }
+  tesseract "$SHOT.png" "$SHOT" >/dev/null 2>&1 || true
+  echo "--- OCR of the virtio-gpu screen (last lines):"
+  grep -v '^[[:space:]]*$' "$SHOT.txt" | tail -n 12 || true
+  grep -qi "login" "$SHOT.txt" && echo "PASS login prompt visible on the virtio-gpu screen" || { echo "FAIL no login prompt on the virtio-gpu screen"; st=1; }
+else
+  echo "FAIL no screendump"; st=1
+fi
 exit $st
