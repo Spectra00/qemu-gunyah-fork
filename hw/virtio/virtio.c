@@ -131,6 +131,7 @@ const char *virtio_device_names[] = {
     [VIRTIO_ID_NET] = "virtio-net",
     [VIRTIO_ID_BLOCK] = "virtio-blk",
     [VIRTIO_ID_CONSOLE] = "virtio-serial",
+    [VIRTIO_ID_RNG] = "virtio-rng",
     [VIRTIO_ID_BALLOON] = "virtio-balloon",
     [VIRTIO_ID_IOMEM] = "virtio-iomem",
     [VIRTIO_ID_RPMSG] = "virtio-rpmsg",
