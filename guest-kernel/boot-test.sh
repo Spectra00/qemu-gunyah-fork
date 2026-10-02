@@ -60,7 +60,9 @@ PY
 dtc -q -I dts -O dtb -o virt-rdma.dtb virt-rdma.dts
 grep -n -A6 "reserved-memory\|memory-region\|memory@" virt-rdma.dts | head -30
 
-APPEND="root=PARTUUID=$PU rootwait ro console=ttyAMA0 hung_task_timeout_secs=30 hung_task_panic=0"
+# cloud-init=disabled: the stock image otherwise spends ~280 s probing for
+# a cloud metadata source before the login prompt (test-only).
+APPEND="root=PARTUUID=$PU rootwait ro console=ttyAMA0 hung_task_timeout_secs=30 hung_task_panic=0 cloud-init=disabled"
 if [ "$MODE" = rdma ]; then DTB=(-dtb virt-rdma.dtb); else DTB=(); fi
 echo "cmdline: $APPEND"
 : > "$LOG"
