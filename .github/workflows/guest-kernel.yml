@@ -5,22 +5,41 @@ on:
   push:
     branches: [ guest-kernel/** ]
 
+permissions:
+  actions: read
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     container: debian:bookworm
     timeout-minutes: 150
+    outputs:
+      kernel_run: ${{ steps.reuse.outputs.run }}
     steps:
       - uses: actions/checkout@v4
+      # guest-kernel/REUSE_KERNEL_RUN, if it names a run id, makes this
+      # workflow reuse that run's kernel artifact instead of rebuilding
+      # (boot-test iterations without a 20-minute kernel build).
+      - name: Reuse an earlier kernel build?
+        id: reuse
+        run: |
+          r=$(cat guest-kernel/REUSE_KERNEL_RUN 2>/dev/null | tr -dc 0-9 || true)
+          echo "run=${r:-${{ github.run_id }}}" >> "$GITHUB_OUTPUT"
+          echo "reuse=${r}" >> "$GITHUB_OUTPUT"
+          echo "kernel artifact from run ${r:-${{ github.run_id }}}"
       - name: Install build dependencies
+        if: steps.reuse.outputs.reuse == ''
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
             build-essential gcc-aarch64-linux-gnu bc bison flex libssl-dev \
             libelf-dev kmod cpio rsync python3
       - name: Build kernel
+        if: steps.reuse.outputs.reuse == ''
         run: OUT=$GITHUB_WORKSPACE/out WORK=/tmp/kwork ./guest-kernel/build-debian12-kernel.sh
       - uses: actions/upload-artifact@v4
+        if: steps.reuse.outputs.reuse == ''
         with:
           name: debian12-gunyah-kernel
           path: out/
@@ -28,13 +47,15 @@ jobs:
   boot-test:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: debian12-gunyah-kernel
           path: out
+          run-id: ${{ needs.build.outputs.kernel_run }}
+          github-token: ${{ github.token }}
       - name: Install QEMU and tools
         run: |
           sudo apt-get update
@@ -44,11 +65,18 @@ jobs:
           curl -fsSL -o deb.qcow2 https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2
           qemu-img convert -O raw deb.qcow2 deb.raw
           sfdisk -l deb.raw
-      - name: Boot test (TCG)
-        run: ./guest-kernel/boot-test.sh out/vmlinuz-$(cat out/KERNELRELEASE) deb.raw
-      - name: Upload boot log
+      - name: Boot test (TCG, gunyah-shaped restricted DMA pool)
+        run: |
+          cp deb.raw deb-a.raw
+          MODE=rdma LOG=boot-rdma.log ./guest-kernel/boot-test.sh out/vmlinuz-$(cat out/KERNELRELEASE) deb-a.raw
+      - name: Boot test (TCG, control without pool)
+        if: always()
+        run: |
+          cp deb.raw deb-b.raw
+          MODE=plain LOG=boot-plain.log ./guest-kernel/boot-test.sh out/vmlinuz-$(cat out/KERNELRELEASE) deb-b.raw
+      - name: Upload boot logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debian12-gunyah-kernel-boot-log
-          path: boot.log
+          path: boot-*.log

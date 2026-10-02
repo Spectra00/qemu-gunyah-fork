@@ -13,17 +13,20 @@ set -euo pipefail
 K=$1        # vmlinuz
 IMG=$2      # raw disk image
 LOG=${LOG:-boot.log}
+MODE=${MODE:-rdma}   # rdma: gunyah-shaped pool + ACCESS_PLATFORM; plain: control
+WAIT=${WAIT:-900}
+if [ "$MODE" = rdma ]; then AP=",iommu_platform=on"; else AP=""; fi
 
 PU=$(sfdisk --part-uuid "$IMG" 1)
 PU=${PU,,}
 echo "root PARTUUID: $PU"
 
-QARGS=(-M virt,gic-version=3 -cpu max -smp 2 -m 1024 -nodefaults -display none
+QARGS=(-M virt,gic-version=3 -cpu max,pauth-impdef=on -smp 2 -m 1024 -nodefaults -display none
        -drive "file=$IMG,if=none,id=d0,format=raw"
-       -device virtio-blk-pci,drive=d0,iommu_platform=on,disable-legacy=on
-       -device virtio-rng-pci,iommu_platform=on,disable-legacy=on
+       -device "virtio-blk-pci,drive=d0,disable-legacy=on$AP"
+       -device "virtio-rng-pci,disable-legacy=on$AP"
        -netdev user,id=n0
-       -device virtio-net-pci,netdev=n0,iommu_platform=on,disable-legacy=on)
+       -device "virtio-net-pci,netdev=n0,disable-legacy=on$AP")
 
 qemu-system-aarch64 "${QARGS[@]}" -machine dumpdtb=virt.dtb
 dtc -q -I dtb -O dts -o virt.dts virt.dtb
@@ -57,14 +60,15 @@ PY
 dtc -q -I dts -O dtb -o virt-rdma.dtb virt-rdma.dts
 grep -n -A6 "reserved-memory\|memory-region\|memory@" virt-rdma.dts | head -30
 
-APPEND="root=PARTUUID=$PU rootwait ro console=ttyAMA0"
+APPEND="root=PARTUUID=$PU rootwait ro console=ttyAMA0 hung_task_timeout_secs=30 hung_task_panic=0"
+if [ "$MODE" = rdma ]; then DTB=(-dtb virt-rdma.dtb); else DTB=(); fi
 echo "cmdline: $APPEND"
 : > "$LOG"
-timeout 1500 qemu-system-aarch64 "${QARGS[@]}" -dtb virt-rdma.dtb \
+timeout $((WAIT + 30)) qemu-system-aarch64 "${QARGS[@]}" "${DTB[@]}" \
   -kernel "$K" -append "$APPEND" -serial "file:$LOG" &
 QPID=$!
 ok=0
-for i in $(seq 1 1450); do
+for i in $(seq 1 "$WAIT"); do
   if grep -q "login:" "$LOG"; then ok=1; break; fi
   if grep -qE "Kernel panic|end Kernel panic" "$LOG"; then break; fi
   kill -0 $QPID 2>/dev/null || break
@@ -73,12 +77,16 @@ done
 kill $QPID 2>/dev/null || true
 wait $QPID 2>/dev/null || true
 
-echo "=================== key lines"
-grep -nE "Linux version|Kernel command line|restricted DMA pool|assigned reserved memory|software IO TLB|virtio_blk|vda|EXT4-fs|VFS:|Kernel panic|Run /sbin/init|Debian GNU/Linux|login:" "$LOG" || true
-echo "=================== checks"
+echo "=================== [$MODE] last 80 console lines"
+tail -n 80 "$LOG" | sed 's/\x1b\[[0-9;]*m//g'
+echo "=================== [$MODE] key lines"
+grep -nE "Linux version|Kernel command line|restricted DMA pool|assigned reserved memory|software IO TLB|virtio_blk|vda|EXT4-fs|VFS:|Kernel panic|Run /sbin/init|Debian GNU/Linux|login:|blocked for more than|swiotlb|DMA: Out of|Call trace" "$LOG" || true
+echo "=================== [$MODE] checks"
 st=0
+if [ "$MODE" = rdma ]; then
 grep -q "created restricted DMA pool" "$LOG" && echo "PASS restricted DMA pool created" || { echo "FAIL no restricted DMA pool"; st=1; }
 grep -q "assigned reserved memory node restricted_dma_reserved" "$LOG" && echo "PASS virtio-pci devices bound to the pool" || { echo "FAIL devices not bound to the pool"; st=1; }
+fi
 grep -qE "EXT4-fs \(vda1\): mounted" "$LOG" && echo "PASS root mounted from vda1 (no initrd)" || { echo "FAIL root not mounted"; st=1; }
 [ $ok = 1 ] && echo "PASS reached login prompt" || { echo "FAIL no login prompt"; st=1; }
 exit $st
