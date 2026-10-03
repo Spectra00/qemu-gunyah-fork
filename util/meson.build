@@ -53,10 +53,12 @@ if have_block or have_ga or have_user
 endif
 if have_block
   util_ss.add(files('aio-wait.c'))
+  util_ss.add(files('buffer.c'))
   util_ss.add(files('bufferiszero.c'))
   util_ss.add(files('iov.c'))
   util_ss.add(files('block-helpers.c'))
   util_ss.add(files('qemu-coroutine-sleep.c'))
   util_ss.add(files('readline.c'))
   util_ss.add(files('timed-average.c'))
+  util_ss.add(files('yank.c'))
 endif

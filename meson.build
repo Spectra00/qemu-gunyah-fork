@@ -1845,6 +1845,7 @@ config_host_data.set('CONFIG_VHOST_VDPA', have_vhost_vdpa)
 config_host_data.set('CONFIG_VMNET', vmnet.found())
 config_host_data.set('CONFIG_VHOST_USER_BLK_SERVER', have_vhost_user_blk_server)
 config_host_data.set('CONFIG_PNG', png.found())
+config_host_data.set('CONFIG_VNC', true)
 config_host_data.set('CONFIG_VIRTFS', have_virtfs)
 config_host_data.set('CONFIG_XKBCOMMON', xkbcommon.found())
 config_host_data.set('CONFIG_KEYUTILS', keyutils.found())
@@ -2709,6 +2710,7 @@ if have_system
     'hw/nvram',
     'hw/pci',
     'hw/rtc',
+    'hw/usb',
     'hw/virtio',
     'migration',
     'net',

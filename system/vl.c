@@ -729,6 +729,25 @@ static void parse_display(const char *p)
         exit(0);
     }
 
+#ifdef CONFIG_VNC
+    const char *opts;
+
+    if (strstart(p, "vnc", &opts)) {
+        /*
+         * vnc isn't a (local) DisplayType but a protocol for remote
+         * display access.
+         */
+        if (*opts == '=') {
+            vnc_parse(opts + 1);
+            display_remote++;
+        } else {
+            error_report("VNC requires a display argument vnc=<display>");
+            exit(1);
+        }
+        return;
+    }
+#endif
+
     parse_display_qapi(p);
 }
 
@@ -830,7 +849,7 @@ static int mon_init_func(void *opaque, QemuOpts *opts, Error **errp)
     return monitor_init_opts(opts, errp);
 }
 
-static void monitor_parse(const char *str)
+static void monitor_parse(const char *str, const char *mode, bool pretty)
 {
     static int monitor_device_index = 0;
     QemuOpts *opts;
@@ -850,7 +869,13 @@ static void monitor_parse(const char *str)
     }
 
     opts = qemu_opts_create(qemu_find_opts("mon"), label, 1, &error_fatal);
+    qemu_opt_set(opts, "mode", mode, &error_abort);
     qemu_opt_set(opts, "chardev", label, &error_abort);
+    if (!strcmp(mode, "control")) {
+        qemu_opt_set_bool(opts, "pretty", pretty, &error_abort);
+    } else {
+        assert(pretty == false);
+    }
     monitor_device_index++;
 }
 
@@ -958,7 +983,7 @@ static void qemu_create_default_devices(void)
                 add_device_config(DEV_SERIAL, "stdio");
             }
             if (default_monitor) {
-                monitor_parse("stdio");
+                monitor_parse("stdio", "readline", false);
             }
         }
     } else {
@@ -969,7 +994,7 @@ static void qemu_create_default_devices(void)
             add_device_config(DEV_PARALLEL, vc ?: "null");
         }
         if (default_monitor && vc) {
-            monitor_parse(vc);
+            monitor_parse(vc, "readline", false);
         }
     }
 
@@ -1926,6 +1951,11 @@ static void qemu_init_displays(void)
 
     os_setup_signal_handling();
 
+    /* init remote displays */
+#ifdef CONFIG_VNC
+    qemu_opts_foreach(qemu_find_opts("vnc"),
+                      vnc_init_func, NULL, &error_fatal);
+#endif
 }
 
 static void qemu_init_board(void)
@@ -2300,8 +2330,16 @@ void qemu_init(int argc, char **argv)
             case QEMU_OPTION_monitor:
                 default_monitor = 0;
                 if (strncmp(optarg, "none", 4)) {
-                    monitor_parse(optarg);
+                    monitor_parse(optarg, "readline", false);
                 }
+                break;
+            case QEMU_OPTION_qmp:
+                monitor_parse(optarg, "control", false);
+                default_monitor = 0;
+                break;
+            case QEMU_OPTION_qmp_pretty:
+                monitor_parse(optarg, "control", true);
+                default_monitor = 0;
                 break;
             case QEMU_OPTION_mon:
                 opts = qemu_opts_parse_noisily(qemu_find_opts("mon"), optarg,
@@ -2416,6 +2454,12 @@ void qemu_init(int argc, char **argv)
                 machine_parse_property_opt(qemu_find_opts("smp-opts"),
                                            "smp", optarg);
                 break;
+#ifdef CONFIG_VNC
+            case QEMU_OPTION_vnc:
+                vnc_parse(optarg);
+                display_remote++;
+                break;
+#endif
             case QEMU_OPTION_no_reboot:
                 olist = qemu_find_opts("action");
                 qemu_opts_parse_noisily(olist, "reboot=shutdown", false);

@@ -9,6 +9,7 @@ source net/Kconfig
 source pci-host/Kconfig
 source pci/Kconfig
 source rtc/Kconfig
+source usb/Kconfig
 source virtio/Kconfig
 
 source arm/Kconfig

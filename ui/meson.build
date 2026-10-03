@@ -7,11 +7,25 @@ system_ss.add(files(
   'cursor.c',
   'dmabuf.c',
   'input-keymap.c',
+  'input-leds.c',
   'input.c',
   'kbd-state.c',
+  'keymaps.c',
   'qemu-pixman.c',
 ))
 system_ss.add(files('console-vc-stubs.c'))
+
+# VNC server, trimmed for DroidVM: no-auth only (no TLS/VeNCrypt, SASL,
+# password auth, websockets or clipboard); JPEG/PNG tight variants off.
+system_ss.add(zlib, files(
+  'vnc.c',
+  'vnc-enc-zlib.c',
+  'vnc-enc-hextile.c',
+  'vnc-enc-tight.c',
+  'vnc-palette.c',
+  'vnc-enc-zrle.c',
+  'vnc-jobs.c',
+))
 if is_android
   system_ss.add(opengl, android_native_window, files(
     'agl.c',
@@ -37,6 +51,7 @@ endif
 keymaps = [
   ['linux', 'qcode'],
   ['qcode', 'linux'],
+  ['qcode', 'qnum'],
   ['qnum', 'qcode'],
   ['usb', 'qcode'],
 ]

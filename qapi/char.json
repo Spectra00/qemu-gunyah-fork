@@ -1,4 +1,6 @@
 
+{ 'include': 'sockets.json' }
+
 { 'struct': 'ChardevCommon',
   'data': { '*logfile': 'str',
             '*logappend': 'bool' } }
@@ -11,13 +13,23 @@
   'data': { '*signal': 'bool' },
   'base': 'ChardevCommon' }
 
+{ 'struct': 'ChardevSocket',
+  'data': { 'addr': 'SocketAddressLegacy',
+            '*server': 'bool',
+            '*wait': 'bool' },
+  'base': 'ChardevCommon' }
+
 { 'enum': 'ChardevBackendKind',
   'data': [ 'null',
+            'socket',
             'mux',
             'stdio' ] }
 
 { 'struct': 'ChardevCommonWrapper',
   'data': { 'data': 'ChardevCommon' } }
+
+{ 'struct': 'ChardevSocketWrapper',
+  'data': { 'data': 'ChardevSocket' } }
 
 { 'struct': 'ChardevMuxWrapper',
   'data': { 'data': 'ChardevMux' } }
@@ -29,5 +41,6 @@
   'base': { 'type': 'ChardevBackendKind' },
   'discriminator': 'type',
   'data': { 'null': 'ChardevCommonWrapper',
+            'socket': 'ChardevSocketWrapper',
             'mux': 'ChardevMuxWrapper',
             'stdio': 'ChardevStdioWrapper' } }

@@ -46,8 +46,11 @@ void qemu_input_event_send_key(QemuConsole *src, KeyValue *key, bool down);
 void qemu_input_event_send_key_qcode(QemuConsole *src, QKeyCode q, bool down);
 void qemu_input_event_send_key_delay(uint32_t delay_ms);
 int qemu_input_linux_to_qcode(unsigned int code);
+int qemu_input_key_value_to_number(const KeyValue *value);
 int qemu_input_key_number_to_qcode(unsigned int nr);
 int qemu_input_key_value_to_qcode(const KeyValue *value);
+int qemu_input_key_value_to_scancode(const KeyValue *value, bool down,
+                                     int *codes);
 
 void qemu_input_queue_btn(QemuConsole *src, InputButton btn, bool down);
 void qemu_input_update_buttons(QemuConsole *src, uint32_t *button_map,
@@ -75,6 +78,9 @@ extern const guint16 qemu_input_map_qcode_to_linux[];
 
 extern const guint qemu_input_map_linux_to_qcode_len;
 extern const guint16 qemu_input_map_linux_to_qcode[];
+
+extern const guint qemu_input_map_qcode_to_qnum_len;
+extern const guint16 qemu_input_map_qcode_to_qnum[];
 
 extern const guint qemu_input_map_qnum_to_qcode_len;
 extern const guint16 qemu_input_map_qnum_to_qcode[];

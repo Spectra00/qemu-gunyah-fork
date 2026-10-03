@@ -1527,6 +1527,25 @@ SRST
     OBP.
 ERST
 
+#ifdef CONFIG_VNC
+DEF("vnc", HAS_ARG, QEMU_OPTION_vnc ,
+    "-vnc <display>  shorthand for -display vnc=<display>\n", QEMU_ARCH_ALL)
+#endif
+SRST
+``-vnc display[,option[,option[,...]]]``
+    Listen for VNC clients on display ``host:d`` (TCP port 5900+d),
+    ``unix:path`` or ``none``. This build only serves unauthenticated
+    connections: ``password``, ``password-secret``, ``sasl``,
+    ``tls-creds``, ``tls-authz``, ``sasl-authz`` and ``websocket`` are
+    rejected. Keysyms are mapped with the en-us layout.
+
+    Supported options: ``to=L``, ``ipv4=on|off``, ``ipv6=on|off``,
+    ``reverse=on|off``, ``share=allow-exclusive|force-shared|ignore``,
+    ``connections=n``, ``display=dev[,head=n]``, ``lock-key-sync=on|off``,
+    ``key-delay-ms=n``, ``non-adaptive=on|off``, ``audiodev=id``,
+    ``power-control=on|off``.
+ERST
+
 ARCHHEADING(, QEMU_ARCH_I386)
 
 ARCHHEADING(i386 target only:, QEMU_ARCH_I386)
@@ -2469,18 +2488,41 @@ SRST
     in non graphical mode. Use ``-monitor none`` to disable the default
     monitor.
 ERST
-DEF("mon", HAS_ARG, QEMU_OPTION_mon, \
-    "-mon [chardev=]name\n", QEMU_ARCH_ALL)
+DEF("qmp", HAS_ARG, QEMU_OPTION_qmp, \
+    "-qmp dev        like -monitor but opens in 'control' mode\n",
+    QEMU_ARCH_ALL)
 SRST
-``-mon [chardev=]name``
-    Set up an HMP monitor connected to the chardev ``name``.
+``-qmp dev``
+    Like ``-monitor`` but opens in 'control' mode (QMP). For example, to
+    make QMP available on a Unix socket::
+
+        -qmp unix:/path/to/qmp.sock,server=on,wait=off
+
+    Not all options are configurable via this syntax; for maximum
+    flexibility use the ``-mon`` option and an accompanying ``-chardev``.
+ERST
+DEF("qmp-pretty", HAS_ARG, QEMU_OPTION_qmp_pretty, \
+    "-qmp-pretty dev like -qmp but uses pretty JSON formatting\n",
+    QEMU_ARCH_ALL)
+SRST
+``-qmp-pretty dev``
+    Like ``-qmp`` but uses pretty JSON formatting.
+ERST
+
+DEF("mon", HAS_ARG, QEMU_OPTION_mon, \
+    "-mon [chardev=]name[,mode=readline|control][,pretty[=on|off]]\n", QEMU_ARCH_ALL)
+SRST
+``-mon [chardev=]name[,mode=readline|control][,pretty[=on|off]]``
+    Set up a monitor connected to the chardev ``name``.
+    The default is HMP; ``mode=control`` selects QMP instead.
+    ``pretty`` is only valid when ``mode=control``.
 
     For example::
 
-      -chardev socket,id=mon1,host=localhost,port=4444,server=on,wait=off \
-      -mon chardev=mon1
+      -chardev socket,id=mon1,path=/path/to/mon.sock,server=on,wait=off \
+      -mon chardev=mon1,mode=control
 
-    enables an HMP monitor on localhost port 4444.
+    enables a QMP monitor on a Unix socket.
 ERST
 
 DEF("pidfile", HAS_ARG, QEMU_OPTION_pidfile, \

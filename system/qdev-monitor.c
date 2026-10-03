@@ -8,6 +8,7 @@
 #include "system/runstate.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-qdev.h"
+#include "qapi/qmp-registry.h"
 #include "qobject/qdict.h"
 #include "qapi/qmp/qerror.h"
 #include "qobject/qstring.h"
@@ -50,6 +51,8 @@ static const QDevAlias qdev_alias_table[] = {
     { "virtio-blk-pci", "virtio-blk", QEMU_ARCH_VIRTIO_PCI },
     { "virtio-keyboard-pci", "virtio-keyboard", QEMU_ARCH_VIRTIO_PCI },
     { "virtio-net-pci", "virtio-net", QEMU_ARCH_VIRTIO_PCI },
+    /* upstream name, used by DroidVM; this fork registers virtio-snd-pci */
+    { "virtio-snd-pci", "virtio-sound-pci", QEMU_ARCH_VIRTIO_PCI },
     { "virtio-tablet-pci", "virtio-tablet", QEMU_ARCH_VIRTIO_PCI },
     { }
 };
@@ -1020,4 +1023,15 @@ int qemu_global_option(const char *str)
     }
 
     return 0;
+}
+
+bool qmp_command_available(const QmpCommand *cmd, Error **errp)
+{
+    if (!phase_check(PHASE_MACHINE_READY) &&
+        !(cmd->options & QCO_ALLOW_PRECONFIG)) {
+        error_setg(errp, "The command '%s' is permitted only after machine initialization has completed",
+                   cmd->name);
+        return false;
+    }
+    return true;
 }

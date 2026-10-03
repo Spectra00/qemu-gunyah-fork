@@ -3,6 +3,7 @@ chardev_ss.add(files(
   'char-io.c',
   'char-mux.c',
   'char-null.c',
+  'char-socket.c',
   'char-stdio.c',
   'char.c',
 ))
