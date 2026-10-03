@@ -1,4 +1,39 @@
-# DroidVM Fork — Fixing Missing Initrd in Gunyah-Accelerated Boot
+# DroidVM Fork — QEMU + Gunyah + Debian 12 guest (final state, archived)
+
+> **Status: archived 2026-10-03.** This was the project's first implementation path: QEMU (`-accel gunyah`, protected VM) running a Debian 12 guest under DroidVM on a OnePlus 15 / Snapdragon 8 Elite Gen 5. It reached a fully booted, networked XFCE desktop, then was superseded by DroidVM's crosvm backend + an Ubuntu 26.04 guest, which already has working, benchmarked GPU acceleration on this phone (3D acceleration would have had to be rebuilt from scratch in QEMU). Everything below is frozen as the final record of that effort on the `archive/qemu-gunyah-debian12` branch / `qemu-debian12-final` tag.
+>
+> Read the **Final state summary** first. Sections 1–19 are the original investigation log, kept verbatim (some of their "next step" notes are superseded by later sections). Sections 20–30 cover the Oct 1–2 work that took the guest from "kernel boots" to a usable desktop.
+
+## Final state summary
+
+**What works, verified on the real phone (2026-10-02):** Debian 12 boots under `-accel gunyah` in protected mode to a login prompt and a full XFCE desktop over DroidVM's VNC console, with DHCP networking and outbound internet (`ping 8.8.8.8`, `curl -I https://deb.debian.org` → HTTP 200). Disk I/O is stable (no SIGBUS); virtio-gpu 2D, USB tablet/keyboard, virtio-net, virtio-rng, QMP and the UART console all work.
+
+**Every fix it took, in order (details in the numbered sections):**
+
+| # | Problem | Fix | Where |
+|---|---|---|---|
+| 1 | Initrd never reached the guest — the Gunyah DTB builder wiped `/chosen/linux,initrd-*` | add the two properties in `gunyah_arm_build_dtb()` | `21fdc26` (sections 4–5, 9.1), on `main` |
+| 2 | `GH_VM_START` rejected `5600000b`/`ENODEV` intermittently (RM/hypervisor reclaim race after the previous VM's teardown, ~10% at a 0 s gap) | QEMU exits with status 83 on `ENODEV`; the launcher relaunches with bounded backoff | `ca8ff7b` on `main` (sections 14–19); app half on DroidVM-dev-fork `feat/retry-gunyah-vm-start-enodev` |
+| 3 | The DroidVM app's own fork/exec crashed the child before `execve` | `close_range(CLOEXEC)` instead of closing ART's fds; reset signals first | DroidVM-dev-fork `eb65e52` (section 20) |
+| 4 | `-qmp` / `-chardev socket` missing (deleted by trim commits `d6e6230`, `baf34aa`) | restore QMP, unix socket chardev, `stop`/`cont` | `fcb56c5` (section 21) |
+| 5 | `invalid object type: rng-random` | restore rng backends + virtio-rng-pci | `fc197cc` (section 21) |
+| 6 | multitouch, xHCI, usb-tablet/kbd, virtio-sound and `-vnc` missing | restore the USB stack, devices and a no-auth local VNC server | `dbca22a` (section 21) |
+| 7 | SIGBUS on the first virtio-blk ring access | guest kernel built with `CONFIG_DMA_RESTRICTED_POOL=y` | `guest-kernel/*` branches (sections 22–23) |
+| 8 | Endless `Waiting for root device` — the qcow2 driver was deleted (`e4eb0df`), so qcow2 disks were read as raw | convert disks to raw in DroidVM; app now passes explicit `format=` | DroidVM-dev-fork `43924e9` (section 24) |
+| 9 | No display (minimal kernel had no DRM; QEMU had no plain `virtio-gpu-pci`) | display kernel variant + restored 2D `virtio-gpu-pci` | `3c468a0`, `guest-kernel/debian12-rdma-display` (section 25) |
+| 10 | Guest-side setup: no password, no DHCP, missing `dbus-launch` | `init=/bin/bash` rescue, systemd-networkd file, `dbus-x11` | section 26 |
+
+**Still open when this path was archived:**
+- **Audio:** the virtio-sound device is present in the guest (`00:08.0`, `1af4:1059`) but the running kernel has no `virtio_snd` driver, and `/lib/modules` only holds the stock `6.1.0-52-cloud-arm64` modules. The kernel config starts from Debian's *cloud* flavour, which most likely compiles sound out entirely. A rebuild with `CONFIG_SND_VIRTIO=y` is the expected fix (unverified). QEMU already forces `VIRTIO_F_IOMMU_PLATFORM` on every virtio-pci device under Gunyah, so stock `virtio_snd` should bounce through the restricted pool (section 27).
+- **Winlator/Steam:** a separate Android app, not part of this VM. The Winlator container stops responding about 15 s after it opens, before any program is started (Android "top resumed state loss timeout" on `XServerDisplayActivity`; no tombstone, no OOM kill, no Steam crash dump). Steam was installed in the container; its last launch used `-cef-disable-gpu`/no-sandbox flags. Root cause never found (section 28).
+- **No 3D acceleration in the guest:** the guest DRM reports `-virgl -resource_blob`. This fork has no `ui/egl-headless`, no `virtio-gpu-rutabaga-pci`, no blob/native-context support (upstream `virtio-gpu-virgl.c` is gone) and builds virglrenderer without Venus, so DroidVM's VirGL/GfxStream options cannot start (section 25.3).
+- Minor: `binfmt_misc` mount fails at boot (no matching modules); cloud-init metadata probing (~4.5 min) unless `cloud-init=disabled`; the qcow2 driver is not restored; reinstalling the DroidVM APK overwrites the hand-installed QEMU binary; a dimming overlay on DroidVM's display pane (app UI, not the guest).
+
+**Final deployed configuration:** section 29. **Branch index:** section 30.
+
+---
+
+## Original investigation log (sections 1–19)
 
 This fork exists to fix a confirmed bug: **when booting a guest under `-accel gunyah` (Protected mode), the initrd is never delivered to the kernel**, because the Gunyah-specific device-tree builder never writes the `linux,initrd-start` / `linux,initrd-end` properties into `/chosen`. This document is the full handoff — read it before touching code.
 
@@ -713,3 +748,114 @@ Recommended next steps:
 - `fix/msi-low-spi-window` remains abandoned (falsified twice over, sections 12 and 17) and should not be merged.
 - `fix/retry-on-vm-start-enodev` is recommended for adoption. Since QEMU itself does not retry or sleep (by design — see 18.1's caveat that RM reports every vdevice failure identically, so retrying must stay a launcher-side, bounded decision), any real launcher (e.g. DroidVM) needs equivalent relaunch-on-exit-83 logic with a similar bounded backoff to get this protection in practice.
 - Whether/how to upstream or merge this branch to `main` has not been decided yet.
+
+
+## 20. The DroidVM app crashed its own QEMU child before `execve` (fixed in DroidVM-dev-fork)
+
+Once QMP existed (section 21), DroidVM still failed with `failed to connect UART socket after multiple attempts`. The cause was in the app, not QEMU: `NativeProcess`'s JNI `nativeForkExec` (`app/src/main/cpp/unixhelper/native_process.c`) forked the multithreaded ART process and then, in the child, `close()`d every fd from 3 to `OPEN_MAX` before resetting signal handlers. Fixed on DroidVM-dev-fork:
+
+- `9817aa3` breadcrumbs written between fork and exec; `6596b50` also appends them to `/data/data/cn.classfun.droidvm/run/forkexec-trace.log` (the app's console tabs never showed them).
+- `eb65e52` marks inherited fds `CLOEXEC` with `close_range(..., CLOSE_RANGE_CLOEXEC)` (fcntl fallback) instead of closing them, and resets signal handlers/mask right after the `dup2`s.
+- Verified on device: every launch reaches `calling execve` with no failure line.
+
+Red herring worth knowing: `libsigchain: Setting SIGSEGV to SIG_DFL` plus a short backtrace (`sigaction+220` / `nativeForkExec+...`) is libsigchain logging our own deliberate signal reset on every launch. It is not a crash.
+
+Also from this stretch: the app's CI debug key was pinned in-repo (`65ca981` / `a68b0e5`) so builds from different branches update in place. That key is public, so it must not reach a branch that feeds a published release. And the CI APK artifact was fixed to download as one installable file (`3e231d9`).
+
+## 21. Devices the fork's size-trimming had deleted, restored (`fix/restore-socket-chardev-qmp`)
+
+DroidVM's real command line (captured from `/data/data/cn.classfun.droidvm/cache/daemon.log`) failed at option parsing, one missing piece at a time. All were restored from the parents of the deletion commits (find those with `git log --full-history -- <path>`; plain `git log -- <path>` can hide a deletion made on a side branch):
+
+| Commit | Restores | CI run | Artifact |
+|---|---|---|---|
+| `fcb56c5` | QMP server, unix-socket chardev, `stop`/`cont` QAPI (deleted by `d6e6230` and `baf34aa`); no TLS/websocket | 36944921424 | zip sha256 `702f6ade…8528` |
+| `fc197cc` | `backends/rng*.c`, `virtio-rng-pci` | 36954442240 | binary sha256 `5855ceb3…5085` |
+| `dbca22a` | `virtio-multitouch-pci`, `qemu-xhci`, `usb-tablet`, `usb-kbd`, `virtio-snd-pci` (alias `virtio-sound-pci`), VNC server (no TLS/SASL/websocket/password/clipboard); 63 files, +20,154, no deletions | 36958643524 | binary sha256 `1b64671f…9b0d` |
+| `49b0e00` | build keeps symbols (dropped `-Wl,-s`) and uploads a symbols artifact | — | — |
+
+Manual invocations need `LD_LIBRARY_PATH=/data/data/cn.classfun.droidvm/usr/lib`. `libqemu-gunyah.so` in the artifact is not used by the app (the accelerator is built into the binary).
+
+## 22. SIGBUS on the first disk I/O — root cause
+
+With all devices present the guest kernel ran for the first time (GICv3, 6 CPUs, PCI enumeration, `virtio_blk` identifies `vda`). QEMU then died with signal 7 about 1 s in. Diagnostic build `72106ab` (branch `diag/gunyah-sigbus-trace`, since deleted) added a fault report:
+
+```
+Signal: 7 (SIGBUS) si_code=3 BUS_OBJERR
+Classification: guest RAM, LEND slot 31 GPA=0xfc181002 (slot GPA 0xfc000000-0x100000000) -- host touched guest-private memory
+```
+
+Reproduced identically on a second run. Symbolized by disassembly in CI (branch `diag/symbolize` `a9713a5`/`c1cfbda`, since deleted): `virtio_lduw_phys_cached()` reading `avail->idx` from `virtio_queue_set_notification()`'s event-idx path. The virtqueue **ring itself** sat in the guest's CMA region (`cma: Reserved 64 MiB at 0xfc000000`), i.e. in lent memory QEMU cannot touch. The stock Debian 6.1 cloud kernel lacks `CONFIG_DMA_RESTRICTED_POOL`, so it never uses the `restricted-dma-pool` the DTB advertises at `0x130000000` (slot 44, `lend=0`). Every guest-RAM slot in this fork is LEND, so **this cannot be fixed in QEMU; the guest kernel must support the restricted pool.**
+
+Confirmation with no rebuild: Ubuntu 24.04's `noble-server-cloudimg-arm64-vmlinuz-generic` (has the option) logged `Reserved memory: created restricted DMA pool at 0x0000000130000000, size 256 MiB`, bound every virtio-pci device to it, and read both disks with no SIGBUS. Its only failure was the expected root-mount mismatch against the Debian rootfs.
+
+Other notes: Android writes no tombstone for these crashes (the Gunyah handler is installed with a raw `rt_sigaction`). The 42-MSI-vector configuration (SPI 16–57) started fine.
+
+## 23. Debian 12 guest kernel with the restricted pool (`guest-kernel/debian12-restricted-dma`)
+
+`guest-kernel/build-debian12-kernel.sh` (workflow `.github/workflows/guest-kernel.yml`) builds Debian's own `linux-source-6.1` with Debian's `cloud-arm64` config plus `CONFIG_DMA_RESTRICTED_POOL=y`. virtio-pci/blk/net/console/rng/input, ext4, vfat, iso9660, NLS, autofs, EFI/MSDOS partitions and xHCI + USB HID are built in, so **no initrd is needed**. Commits `86a1393` → `96b6664` → `8fd12a9` → `aa980bc`; CI run 36974463177 produced `vmlinuz-6.1.176-gunyah-rdma` plus a `modules-*.tar.gz`, `config-*` and `System.map-*`. `boot-test.sh` boots it under TCG in CI (with `cloud-init=disabled` so the login prompt is reachable).
+
+On device: restricted pool line present, both disks identified, no SIGBUS, 10+ minutes of uptime. Then it hung at `Waiting for root device` (section 24).
+
+## 24. qcow2 support was deleted from the fork
+
+`e4eb0df` (a July "delete junk code" commit) removed `block/qcow2*.c` (~13,000 lines). QEMU probed the `.qcow2` files, found no driver, fell back to raw (`WARNING: Image format was not specified ... probing guessed raw`), and the guest saw the container bytes (a 324 MiB "disk" with no partition table).
+
+- Workaround used: DroidVM's disk **Convert → RAW** (it uses the app's separate bundled `qemu-img`) for `debian-12-genericcloud-arm64.qcow2` → `.img` and `build-data.qcow2` → `build-data.img`. The VM was repointed at the `.img` files. Raw is also at least as fast as qcow2.
+- App-side: DroidVM-dev-fork `43924e9` (+ lint `62ba3a3`) passes an explicit `format=` on every `-drive`, so a missing driver now fails loudly instead of silently hanging.
+- Restoring qcow2 in the fork was never done.
+
+## 25. Display: 2D virtio-gpu and the display kernel
+
+### 25.1 QEMU (`fix/restore-virtio-gpu-2d`, `3c468a0`)
+`hw/display/virtio-gpu-pci.c` was split out from the GL variant so a plain 2D `virtio-gpu-pci` builds without GL. CI run 36988113624; installed binary sha256 `540a5677…1e5b`. `ramfb` cannot work in this configuration: it is only programmed by UEFI firmware through fw_cfg, and these boots are direct-kernel.
+
+### 25.2 Kernel (`guest-kernel/debian12-rdma-display`)
+`ededbce` adds virtio-gpu DRM, fbdev emulation, fbcon, simpledrm and evdev (built in); `31b7ad3` fixes the boot-test assertions. Build run 36988430255 built the kernel, but its boot-test job failed on the two wrong assertions; the rerun 36991246470 reused that kernel and passed (`screen-check.py` takes a QMP `screendump` and counts lit pixels). Output: `vmlinuz-6.1.176-gunyah-rdma-drm`.
+
+On device: `[drm] Initialized virtio_gpu 0.1.0`, `features: -virgl +edid -resource_blob -host_visible`, console on `fb0`, login prompt on the VNC screen.
+
+### 25.3 Why there is no 3D in this fork
+DroidVM's QEMU backend emits `virtio-gpu-gl-pci` (VirGL) or `virtio-gpu-rutabaga-pci` (GfxStream) plus `-display egl-headless,blob=on`. In this fork, `ui/egl-headless.c` and the rutabaga device do not exist. The trimmed `virtio-gpu-gl.c` (688 lines) has no blob, hostmem or native-context handling (upstream's `virtio-gpu-virgl.c` was deleted). `build.sh` builds `AnyLaySys/virglrenderer` without Venus or DRM renderers. Real acceleration would also need DroidVM's protected-VM memory model for GPU buffers (a boot-shared guest pool plus udmabuf, which crosvm implements). This gap is why the project moved to crosvm.
+
+## 26. First full boot and guest setup (2026-10-02)
+
+- `Welcome to Debian GNU/Linux 12 (bookworm)!`, `localhost login:` on `ttyAMA0`, DHCP on `enp0s7`, zero SIGBUS. The process stayed alive.
+- **Password:** the cloud image has none and cloud-init found no seed. A one-time boot with `... rootwait rw init=/bin/bash console=ttyAMA0`, then `passwd root`, `passwd debian`, `sync`, stop the VM from the app, restore the cmdline.
+- **Network after `cloud-init=disabled`:** `enp0s7` was `degraded (unmanaged)` because nothing configured it. Fix: `/etc/systemd/network/10-enp0s7.network` containing `[Match] Name=enp0s7` / `[Network] DHCP=yes`, then `systemctl restart systemd-networkd`. One later "Destination Host Unreachable" from the gateway cleared after a VM restart (host-side bridge state).
+- **Desktop:** `apt update && apt install -y xfce4 lightdm dbus-x11`, then `systemctl enable --now lightdm`. Without `dbus-x11`, xfce fails on `dbus-launch`. AccountsService "user list" errors are cosmetic. User `tron` exists but is not in `sudo` (use `su -`, or `usermod -aG sudo tron`). `firefox-esr` installed.
+
+## 27. Audio — open
+
+`lspci` shows `00:08.0 Multimedia audio controller: Red Hat, Inc. Device 1059` (virtio-sound, from `-audiodev aaudio -device virtio-sound-pci`). The guest has no sound driver: `modprobe virtio_snd` fails, there is no `/proc/asound`, and `/lib/modules` contains only `6.1.0-52-cloud-arm64` (the stock kernel's modules), not `6.1.176-gunyah-rdma-drm`. The CI `modules-*.tar.gz` was never installed in the guest. Debian's `cloud-arm64` base config most likely disables sound entirely, so the expected fix is a kernel rebuild with `CONFIG_SOUND`/`CONFIG_SND`/`CONFIG_SND_VIRTIO=y` (unverified: check `grep SND` in the CI `config-*`). On the QEMU side no change should be needed: `virtio_pci_pre_plugged()` adds `VIRTIO_F_IOMMU_PLATFORM` to every virtio-pci device under Gunyah, so the stock driver bounces through the restricted pool.
+
+## 28. Winlator/Steam investigation — open, outside this VM
+
+Native Steam was not attempted in the Debian guest (no 3D, and at the time no ARM64 Steam client was assumed to exist). The investigation moved to **Winlator** (Android app `com.winlator`, Winlator 11.2: Wine + Box64 0.4.4 + Turnip, Adreno 840 detected), a separate app outside this VM:
+
+- Container defaults: Turnip (Vulkan), DXVK + VKD3D, Box64 preset Performance, Windows 10, `WINEESYNC`, `MESA_SHADER_CACHE` 512 MB, `TU_DEBUG=noconform`, `ZINK_DESCRIPTORS=lazy`.
+- Data lives in `/data/data/com.winlator/` (root only; OxygenOS blocks `Android/data` even with all-files access).
+- Steam was installed in the container (`.../.wine/drive_c/Program Files (x86)/Steam`). The last launch used `-noshaders -nooverlay -no-browser -nocrashmonitor -no-shared-textures -cef-disable-gpu -cef-disable-gpu-compositing -cef-disable-gpu-sandbox -cef-disable-d3d11 -cef-disable-sandbox -no-cef-sandbox -cef-disable-seccomp-sandbox`.
+- **Symptom:** the container stops responding about 15 s after it opens, even with no program launched. logcat shows `Activity top resumed state loss timeout` for `XServerDisplayActivity`. There was no fatal exception, tombstone, segfault, OOM or lowmemorykiller kill, and `Steam/dumps/reports` was empty. `console_log.txt` stops at `Console Log Start`; `cef_log` shows repeated `Check failed: false. NOTREACHED`.
+- The per-PID `logcat -d --pid=<winlator pid>` capture taken right after a freeze was never completed. That is the next step if this is ever resumed.
+
+## 29. Final deployed configuration (OnePlus 15 / SM8850, Adreno 840, KernelSU-Next + ReZygisk, Termux + `su`)
+
+| Item | Value |
+|---|---|
+| DroidVM APK | DroidVM-dev-fork `fix/qemu-drive-explicit-format` @ `3e231d9` (CI run 36982034500, `app-debug.apk` sha256 `363d82a8…7f6a`). **Does not** contain `feat/retry-gunyah-vm-start-enodev` (launcher retry on exit 83 + duplicate-start guard). |
+| QEMU | this repo `fix/restore-virtio-gpu-2d` @ `3c468a0`, copied by hand to `/data/data/cn.classfun.droidvm/usr/bin/qemu-system-aarch64` (+ `lib/*.so*` to `usr/lib/`). Any APK reinstall overwrites it with the bundled prebuilt. |
+| Guest kernel | `/storage/emulated/0/DroidVM/Debian-12_6/boot/vmlinuz-6.1.176-gunyah-rdma-drm`, **no initrd** |
+| Cmdline | `root=PARTUUID=dcfd78c7-076c-48a6-905b-1485e18f1d16 rootwait ro console=tty0 console=ttyAMA0 cloud-init=disabled` |
+| Disks | `debian-12-genericcloud-arm64.img` (3 GiB) + `build-data.img` (60 GiB), raw, virtio-blk with iothreads |
+| VM | Backend QEMU; Protected; UEFI off; Linux boot protocol; 3072M; 6 vCPU (`sockets=1,cores=3,threads=2`); SWIOTLB 256 MiB |
+| Graphics | Virtio-GPU screen on, renderer **2D (Software)**, exporter VNC; SimpleFB screen off |
+| Other devices | NAT/tap virtio-net, aaudio + virtio-sound, xHCI + usb-tablet + usb-kbd, virtio-multitouch, virtio-keyboard, virtio-rng |
+| Guest userspace | Debian 12, systemd-networkd file from section 26, xfce4 + lightdm + dbus-x11 + firefox-esr, users `root`, `debian`, `tron` |
+
+## 30. Branch index (this repo and DroidVM-dev-fork)
+
+qemu-gunyah-fork: `main` (initrd fix + diagnostics + retry exit 83); `fix/restore-socket-chardev-qmp` (sections 21); `fix/restore-virtio-gpu-2d` (section 25.1, stacks on the previous); `guest-kernel/debian12-restricted-dma`, `guest-kernel/debian12-rdma-display` (sections 23, 25.2); `fix/retry-on-vm-start-enodev` (merged); `fix/msi-low-spi-window` (abandoned, sections 12/17); `diag/msi-a-no-msi-bells`, `diag/msi-b-numspis-zero` (diagnostics); `claude/festive-rubin-c4zarb`, `upstream-fix` (the original initrd fix branches).
+
+DroidVM-dev-fork: `fix/native-fork-exec-cloexec`, `diag/native-fork-breadcrumbs`, `ci/pin-debug-keystore`, `fix/qemu-drive-explicit-format` (the installed build), `feat/retry-gunyah-vm-start-enodev`, `fix/duplicate-vm-start`. See that repo's `HANDOFF_README.md` on the archive branch.
+
+The archive branch `archive/qemu-gunyah-debian12` merges the final QEMU and kernel branches (`fix/restore-virtio-gpu-2d`, `guest-kernel/debian12-rdma-display`) on top of this document, so the tag `qemu-debian12-final` holds the whole implementation in one tree.
